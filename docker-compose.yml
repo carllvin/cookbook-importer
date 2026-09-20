@@ -1,0 +1,21 @@
+services:
+  cookbook-importer:
+    build: ./backend
+    container_name: cookbook-importer
+    restart: unless-stopped
+    ports:
+      - "8420:8000"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      TANDOOR_URL: ${TANDOOR_URL}
+      TANDOOR_TOKEN: ${TANDOOR_TOKEN}
+      OUTPUT_LANGUAGE: ${OUTPUT_LANGUAGE:-Deutsch}
+      CONVERT_TO_METRIC: ${CONVERT_TO_METRIC:-true}
+      CHECK_DUPLICATES: ${CHECK_DUPLICATES:-true}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+    volumes:
+      - cookbook_data:/app/data
+
+volumes:
+  cookbook_data:
