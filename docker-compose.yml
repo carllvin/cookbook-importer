@@ -1,0 +1,33 @@
+services:
+  cookbook-importer:
+    build: ./backend
+    container_name: cookbook-importer
+    restart: unless-stopped
+    ports:
+      - "8420:8000"
+    environment:
+      AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      TANDOOR_URL: ${TANDOOR_URL}
+      TANDOOR_TOKEN: ${TANDOOR_TOKEN}
+      OUTPUT_LANGUAGE: ${OUTPUT_LANGUAGE:-English}
+      CONVERT_TO_METRIC: ${CONVERT_TO_METRIC:-true}
+      CHECK_DUPLICATES: ${CHECK_DUPLICATES:-true}
+      REUSE_EXISTING_TAGS: ${REUSE_EXISTING_TAGS:-true}
+      CUSTOM_INSTRUCTIONS: ${CUSTOM_INSTRUCTIONS:-}
+      TOC_AWARE_CHUNKING: ${TOC_AWARE_CHUNKING:-false}
+      JOB_RETENTION_HOURS: ${JOB_RETENTION_HOURS:-48}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+    volumes:
+      - cookbook_data:/app/data
+    # Defined in the Dockerfile (HEALTHCHECK instruction); shown here only as a
+    # reminder that `docker compose ps` will report healthy/unhealthy for this
+    # service. Override interval/timeout/retries here if you need to.
+
+volumes:
+  cookbook_data:
