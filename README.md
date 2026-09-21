@@ -7,11 +7,11 @@ Upload a cookbook and let an AI model automatically identify individual recipes,
 Supported AI providers: Claude · ChatGPT · Gemini
 
 <p align="center">
-  <img src="screenshots/main_page.png" alt="Main page" width="49%">
-  <img src="screenshots/preview_page_1.png" alt="Recipe preview" width="49%">
+  <img src="screenshots/main_page.png" alt="Main page" width="100%">
+  <img src="screenshots/preview_page_1.png" alt="Recipe preview" width="100%">
   <br>
-  <img src="screenshots/preview_page_2.png" alt="Recipe preview" width="49%">
-  <img src="screenshots/succesful_import.png" alt="Successful Tandoor import" width="49%">
+  <img src="screenshots/preview_page_2.png" alt="Recipe preview" width="100%">
+  <img src="screenshots/succesful_import.png" alt="Successful Tandoor import" width="100%">
 </p>
 
 ✨ Features
