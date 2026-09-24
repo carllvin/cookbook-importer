@@ -888,7 +888,7 @@ function goHome() {
 
 // ---------- Maintenance tools ----------
 
-const toolsState = { jobId: null, pollTimer: null };
+const toolsState = { jobId: null, pollTimer: null, job: null, selected: new Set(), busy: false };
 
 el('tools-nav-btn').addEventListener('click', () => {
   el('upload-screen').classList.add('hidden');
@@ -903,6 +903,8 @@ el('tools-nav-btn').addEventListener('click', () => {
 el('tools-back-btn').addEventListener('click', () => {
   clearTimeout(toolsState.pollTimer);
   toolsState.jobId = null;
+  toolsState.job = null;
+  toolsState.selected.clear();
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
 });
@@ -926,6 +928,10 @@ async function startTool(endpoint, title) {
   el('tools-cancel-btn').disabled = false;
   el('tools-cancel-btn').textContent = t('toolCancelBtn');
   el('tools-suggestions-list').innerHTML = '';
+  el('tools-bulk-bar').classList.add('hidden');
+  el('tools-bulk-status').textContent = '';
+  toolsState.job = null;
+  toolsState.selected.clear();
 
   try {
     const res = await fetch(endpoint, { method: 'POST' });
@@ -1011,49 +1017,111 @@ function renderToolUsage(job) {
   }
 }
 
+// Selection + bulk apply: every pending suggestion gets a checkbox, and the
+// bar above the list applies/skips all checked ones. They're sent one after
+// another (not in parallel) - merges touch shared recipes, and running them
+// sequentially keeps the same order and safety as clicking them one by one.
 function renderToolSuggestions(job) {
+  toolsState.job = job;
   const list = el('tools-suggestions-list');
+  const pendingIds = new Set(job.suggestions.filter((s) => s.status === 'pending').map((s) => s.id));
+  // Drop selections that are no longer pending (applied/skipped/failed).
+  toolsState.selected.forEach((id) => { if (!pendingIds.has(id)) toolsState.selected.delete(id); });
+
   if (job.suggestions.length === 0) {
+    el('tools-bulk-bar').classList.add('hidden');
     list.innerHTML = `<p style="color:#8f9689;">${t('toolNoSuggestions')}</p>`;
     return;
   }
+  el('tools-bulk-bar').classList.toggle('hidden', pendingIds.size === 0 && !toolsState.busy);
 
   list.innerHTML = job.suggestions.map((s) => `
     <div class="tool-suggestion-row ${s.status}" data-suggestion-id="${s.id}">
+      ${s.status === 'pending'
+        ? `<input type="checkbox" class="suggestion-check" ${toolsState.selected.has(s.id) ? 'checked' : ''} ${toolsState.busy ? 'disabled' : ''}>`
+        : ''}
       <div class="suggestion-text">
         ${escapeHtml(s.summary)}
         ${s.preview ? `<details class="suggestion-preview"><summary>${t('toolShowPreview')}</summary><pre>${escapeHtml(s.preview)}</pre></details>` : ''}
       </div>
-      ${s.status === 'pending' ? `
-        <div class="suggestion-actions">
-          <button class="btn secondary suggestion-skip-btn" type="button">${t('toolSkipBtn')}</button>
-          <button class="btn suggestion-apply-btn" type="button">${t('toolApplyBtn')}</button>
-        </div>
-      ` : `<span class="suggestion-status-label">${s.status === 'applied' ? t('toolStatusApplied') : s.status === 'skipped' ? t('toolStatusSkipped') : escapeHtml(s.error || t('toolStatusError'))}</span>`}
+      ${s.status === 'pending' ? '' : `<span class="suggestion-status-label">${s.status === 'applied' ? t('toolStatusApplied') : s.status === 'skipped' ? t('toolStatusSkipped') : escapeHtml(s.error || t('toolStatusError'))}</span>`}
     </div>
   `).join('');
 
-  list.querySelectorAll('.suggestion-apply-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => handleSuggestionAction(e.target.closest('.tool-suggestion-row').dataset.suggestionId, 'apply'));
+  list.querySelectorAll('.tool-suggestion-row.pending').forEach((row) => {
+    const box = row.querySelector('.suggestion-check');
+    const toggle = (checked) => {
+      if (checked) toolsState.selected.add(row.dataset.suggestionId);
+      else toolsState.selected.delete(row.dataset.suggestionId);
+      updateBulkBar();
+    };
+    box.addEventListener('change', () => toggle(box.checked));
+    // Clicking anywhere on the row toggles it too - except the preview.
+    row.addEventListener('click', (e) => {
+      if (toolsState.busy || e.target === box || e.target.closest('details')) return;
+      box.checked = !box.checked;
+      toggle(box.checked);
+    });
   });
-  list.querySelectorAll('.suggestion-skip-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => handleSuggestionAction(e.target.closest('.tool-suggestion-row').dataset.suggestionId, 'skip'));
-  });
+  updateBulkBar();
 }
 
-async function handleSuggestionAction(suggestionId, action) {
-  const row = document.querySelector(`.tool-suggestion-row[data-suggestion-id="${suggestionId}"]`);
-  if (row) row.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+function updateBulkBar() {
+  const job = toolsState.job;
+  const pending = job ? job.suggestions.filter((s) => s.status === 'pending').length : 0;
+  const n = toolsState.selected.size;
+  const all = el('tools-select-all');
+  all.checked = pending > 0 && n === pending;
+  all.indeterminate = n > 0 && n < pending;
+  all.disabled = toolsState.busy || pending === 0;
+  el('tools-apply-selected-btn').textContent = tf('toolApplySelectedBtn', { count: n });
+  el('tools-skip-selected-btn').textContent = tf('toolSkipSelectedBtn', { count: n });
+  el('tools-apply-selected-btn').disabled = toolsState.busy || n === 0;
+  el('tools-skip-selected-btn').disabled = toolsState.busy || n === 0;
+}
 
+el('tools-select-all').addEventListener('change', (e) => {
+  const job = toolsState.job;
+  if (!job) return;
+  toolsState.selected = new Set(e.target.checked ? job.suggestions.filter((s) => s.status === 'pending').map((s) => s.id) : []);
+  renderToolSuggestions(job);
+});
+
+el('tools-apply-selected-btn').addEventListener('click', () => runBulkAction('apply'));
+el('tools-skip-selected-btn').addEventListener('click', () => runBulkAction('skip'));
+
+async function runBulkAction(action) {
+  const job = toolsState.job;
+  if (!job || toolsState.busy) return;
+  // Keep the list order, so e.g. merges run in the order they're shown.
+  const ids = job.suggestions.filter((s) => toolsState.selected.has(s.id)).map((s) => s.id);
+  if (ids.length === 0) return;
+
+  const jobId = toolsState.jobId;
+  toolsState.busy = true;
+  renderToolSuggestions(job);
+  const status = el('tools-bulk-status');
+  let failed = 0;
   try {
-    const res = await fetch(`/api/tools/jobs/${toolsState.jobId}/suggestions/${suggestionId}/${action}`, { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const res2 = await fetch(`/api/tools/jobs/${toolsState.jobId}`);
-    const job = await res2.json();
-    renderToolSuggestions(job);
-  } catch (e) {
-    alert(`${t('toolActionFailed')}: ${e.message}`);
-    if (row) row.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    for (let i = 0; i < ids.length; i++) {
+      if (toolsState.jobId !== jobId) return; // user left this run
+      status.textContent = tf(action === 'apply' ? 'toolApplyingProgress' : 'toolSkippingProgress', { current: i + 1, total: ids.length });
+      try {
+        const res = await fetch(`/api/tools/jobs/${jobId}/suggestions/${ids[i]}/${action}`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const s = await res.json();
+        if (s.status === 'error') failed++;
+      } catch (e) {
+        failed++;
+      }
+      toolsState.selected.delete(ids[i]);
+      const res2 = await fetch(`/api/tools/jobs/${jobId}`);
+      if (res2.ok) renderToolSuggestions(await res2.json());
+    }
+  } finally {
+    toolsState.busy = false;
+    status.textContent = failed ? tf('toolBulkFailed', { count: failed }) : '';
+    if (toolsState.job) renderToolSuggestions(toolsState.job);
   }
 }
 
