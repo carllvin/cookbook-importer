@@ -464,6 +464,7 @@ async def generate_recipe_image(job_id: str, recipe_id: str):
 # tool name -> (job kind saved on the ToolJob, the scan function to run in a background thread)
 _TOOL_SCANS = {
     "ingredients_review": tools_ingredients.run_scan,
+    "ingredients_enrich": tools_ingredients.run_enrich_scan,
     "tags_cleanup": tools_tags.run_cleanup_scan,
     "tags_simplify": tools_tags.run_simplify_scan,
     "tags_translate": tools_tags.run_translate_scan,
@@ -476,6 +477,7 @@ _TOOL_SCANS = {
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
 _TOOL_APPLY = {
     "ingredients_review": tools_ingredients.apply_suggestion,
+    "ingredients_enrich": tools_ingredients.apply_enrich_suggestion,
     "tags_cleanup": tools_tags.apply_suggestion,
     "tags_simplify": tools_tags.apply_suggestion,
     "tags_translate": tools_tags.apply_suggestion,
@@ -495,6 +497,11 @@ def _start_tool_job(tool: str):
 @app.post("/api/tools/ingredients/review")
 async def start_ingredients_review():
     return _start_tool_job("ingredients_review")
+
+
+@app.post("/api/tools/ingredients/enrich")
+async def start_ingredients_enrich():
+    return _start_tool_job("ingredients_enrich")
 
 
 @app.post("/api/tools/tags/cleanup")

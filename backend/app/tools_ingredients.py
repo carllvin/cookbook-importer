@@ -216,3 +216,248 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
         tool_jobs.save_tool_job(job)
 
     return suggestion
+
+
+# ---------- Enrich: fill in missing plural + nutrition ----------
+
+ENRICH_CHUNK_SIZE = 40
+PROPERTY_TYPE_ENDPOINT_CANDIDATES = ["property-type", "food-property-type", "propertytype"]
+NUTRIENTS = [  # (Tandoor property type name, unit, key in the AI's answer)
+    ("Energy", "kcal", "energy_kcal"),
+    ("Protein", "g", "protein_g"),
+    ("Fat", "g", "fat_g"),
+    ("Carbohydrates", "g", "carbs_g"),
+]
+
+ENRICH_SYSTEM_PROMPT = """You fill in missing data for ingredient entries in
+a home cook's database. The language is {language}. You will receive a JSON
+array, each element {"id": integer, "name": string, "needs_plural": bool,
+"needs_nutrition": bool}.
+
+For every element, answer:
+- "plural_name" (only if needs_plural): the plural of the name in
+  {language}, e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier". Use null if the
+  plural is spelled exactly like the singular (e.g. "Zucker", "Messer") or
+  if the ingredient isn't normally counted (e.g. "Mehl", "Salz", "Milch").
+- "nutrition" (only if needs_nutrition): rough typical values for the raw /
+  commonly used ingredient, as {"basis": "g" or "ml", "energy_kcal": number,
+  "protein_g": number, "fat_g": number, "carbs_g": number} per 100 g - or
+  per 100 ml for liquids (then basis "ml"). Use well-known reference values
+  (USDA-style), rounded sensibly. Use null if the name is too vague to
+  estimate (e.g. "Gewürzmischung nach Wahl").
+
+Respond with ONLY a JSON array (no explanation, no markdown fence), one
+element per input element:
+{"id": <id>, "plural_name": <string or null>, "nutrition": <object or null>}
+"""
+
+
+def _fetch_all_foods_full(client):
+    """Paginated /food/ list. Tandoor's list view already contains
+    plural_name and properties, so no per-food GET is needed."""
+    foods = []
+    url, params = "/food/", {"page_size": 200}
+    for _ in range(100):
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        foods.extend(data.get("results", data) if isinstance(data, dict) else data)
+        url = data.get("next") if isinstance(data, dict) else None
+        if not url:
+            break
+        params = None
+    return foods
+
+
+def _same_word(a, b):
+    return (a or "").strip().lower() == (b or "").strip().lower()
+
+
+def _clean_nutrition(nutrition):
+    if not isinstance(nutrition, dict):
+        return None
+    cleaned = {"basis": "ml" if nutrition.get("basis") == "ml" else "g"}
+    for _name, _unit, key in NUTRIENTS:
+        value = nutrition.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            cleaned[key] = round(float(value), 1)
+    return cleaned if len(cleaned) > 1 else None
+
+
+def _describe_enrich(name, plural, nutrition):
+    parts = []
+    if plural:
+        parts.append(f"plural {plural!r}")
+    if nutrition:
+        values = {
+            "energy_kcal": "{} kcal", "protein_g": "{} g protein", "fat_g": "{} g fat", "carbs_g": "{} g carbs",
+        }
+        parts.append(", ".join(values[k].format(f"{nutrition[k]:g}") for k in values if k in nutrition)
+                     + f" per 100 {nutrition['basis']}")
+    return f"{name!r}: " + " · ".join(parts)
+
+
+def run_enrich_scan(job_id: str) -> None:
+    """Finds foods without a plural and/or without any nutrition properties
+    and asks the AI for both in batches of ENRICH_CHUNK_SIZE foods per call.
+    A proposed plural spelled like the singular is dropped - there's nothing
+    to add then. One suggestion per food."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        return
+    try:
+        if not llm_provider.is_configured():
+            job.status = "error"
+            job.error = llm_provider.missing_key_hint()
+            tool_jobs.save_tool_job(job)
+            return
+
+        with tandoor_client.get_client() as client:
+            job.progress_label = "Loading ingredients..."
+            tool_jobs.save_tool_job(job)
+            targets = []
+            for food in _fetch_all_foods_full(client):
+                needs_plural = not (food.get("plural_name") or "").strip()
+                needs_nutrition = not food.get("properties")
+                if needs_plural or needs_nutrition:
+                    targets.append({"id": food["id"], "name": food["name"],
+                                    "needs_plural": needs_plural, "needs_nutrition": needs_nutrition})
+            job.progress_total = len(targets)
+            job.cost_estimate = format_cost_estimate(len(targets), "chunked_enrich")
+            tool_jobs.save_tool_job(job)
+
+            by_id = {t["id"]: t for t in targets}
+            system_prompt = ENRICH_SYSTEM_PROMPT.replace("{language}", settings.output_language)
+            suggestions = []
+            chunks = list(chunked(targets, ENRICH_CHUNK_SIZE))
+            for i, chunk in enumerate(chunks, 1):
+                if job.cancel_requested:
+                    break
+                job.progress_label = f"Checking ingredients {i}/{len(chunks)}..."
+                tool_jobs.save_tool_job(job)
+                try:
+                    text_out, usage = llm_provider.complete_text(
+                        system_prompt, json.dumps(chunk, ensure_ascii=False), max_tokens=8000
+                    )
+                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+                    text_out = text_out.strip().strip("`")
+                    if text_out.startswith("json"):
+                        text_out = text_out[4:]
+                    answers = json.loads(text_out)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Ingredients enrich chunk %d failed: %s", i, exc)
+                    answers = []
+
+                for answer in answers:
+                    target = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+                    if target is None:
+                        continue
+                    plural = answer.get("plural_name") if target["needs_plural"] else None
+                    plural = plural.strip() if isinstance(plural, str) else ""
+                    if _same_word(plural, target["name"]):
+                        plural = ""  # plural == singular: nothing to add
+                    nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
+                    if not plural and not nutrition:
+                        continue
+                    suggestions.append(ToolSuggestion(
+                        id=uuid.uuid4().hex[:10], kind="enrich",
+                        summary=_describe_enrich(target["name"], plural, nutrition),
+                        detail={"food_id": target["id"], "plural_name": plural or None, "nutrition": nutrition},
+                    ))
+                job.progress_current = min(i * ENRICH_CHUNK_SIZE, len(targets))
+                tool_jobs.save_tool_job(job)
+
+            job.suggestions = suggestions
+            job.status = "cancelled" if job.cancel_requested else "ready"
+            job.progress_label = None
+            tool_jobs.save_tool_job(job)
+
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Ingredients enrich scan failed for job %s", job_id)
+        job.status = "error"
+        job.error = str(exc)
+        tool_jobs.save_tool_job(job)
+
+
+def _get_or_create_property_type(client, name, unit):
+    """Returns the {"id", "name"} of the property type called `name`,
+    creating it (with `unit`) if it doesn't exist yet. Tries the endpoint
+    names used by different Tandoor versions."""
+    last_error = None
+    for endpoint in PROPERTY_TYPE_ENDPOINT_CANDIDATES:
+        resp = client.get(f"/{endpoint}/", params={"query": name, "page_size": 50})
+        if resp.status_code == 404:
+            continue
+        if resp.status_code != 200:
+            last_error = f"{resp.status_code} {resp.text[:200]}"
+            continue
+        data = resp.json()
+        for item in data.get("results", data) if isinstance(data, dict) else data:
+            if _same_word(item.get("name"), name):
+                return {"id": item["id"], "name": item["name"]}
+        resp = client.post(f"/{endpoint}/", json={"name": name, "unit": unit})
+        if resp.status_code not in (200, 201):
+            raise tandoor_client.TandoorError(f"Could not create property type {name!r}: {resp.status_code} {resp.text[:300]}")
+        return {"id": resp.json()["id"], "name": name}
+    raise tandoor_client.TandoorError(
+        f"No property-type endpoint found (tried {PROPERTY_TYPE_ENDPOINT_CANDIDATES})"
+        + (f": {last_error}" if last_error else "")
+    )
+
+
+def apply_enrich_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
+    """Re-reads the food first and only fills fields that are STILL empty -
+    never overwrites a plural or nutrition values set in the meantime."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise tandoor_client.TandoorError("Job not found.")
+    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
+    if suggestion is None:
+        raise tandoor_client.TandoorError("Suggestion not found.")
+    if suggestion.status != "pending":
+        return suggestion
+
+    detail = suggestion.detail
+    try:
+        with tandoor_client.get_client() as client:
+            resp = client.get(f"/food/{detail['food_id']}/")
+            if resp.status_code == 404:
+                raise tandoor_client.TandoorError("This ingredient no longer exists (merged or deleted?).")
+            resp.raise_for_status()
+            food = resp.json()
+
+            # "name" is always sent along: some Tandoor serializers read it
+            # unconditionally on update and 500 without it (see units).
+            payload = {"name": food["name"]}
+            if detail.get("plural_name") and not (food.get("plural_name") or "").strip():
+                payload["plural_name"] = detail["plural_name"]
+
+            nutrition = detail.get("nutrition")
+            if nutrition and not food.get("properties"):
+                properties = []
+                for name, unit, key in NUTRIENTS:
+                    if key in nutrition:
+                        properties.append({
+                            "property_type": _get_or_create_property_type(client, name, unit),
+                            "property_amount": nutrition[key],
+                        })
+                payload["properties"] = properties
+                # The values are per 100 g/ml - tell Tandoor, unless the food
+                # already has its own reference amount configured.
+                if not food.get("properties_food_unit"):
+                    unit_id, unit_name = tandoor_client._get_or_create(client, "unit", nutrition["basis"])
+                    payload["properties_food_amount"] = 100
+                    payload["properties_food_unit"] = {"id": unit_id, "name": unit_name}
+
+            if len(payload) > 1:
+                resp = client.patch(f"/food/{detail['food_id']}/", json=payload)
+                if resp.status_code not in (200, 201):
+                    raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+        suggestion.status = "applied"
+    except Exception as exc:  # noqa: BLE001
+        suggestion.status = "error"
+        suggestion.error = str(exc)
+    finally:
+        tool_jobs.save_tool_job(job)
+    return suggestion
