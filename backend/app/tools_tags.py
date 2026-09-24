@@ -360,25 +360,53 @@ def apply_season_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     return suggestion
 
 
-SUGGEST_MORE_SYSTEM_PROMPT = """You suggest additional tags for an under-
-tagged recipe in a database whose target language is {language}. You will
-receive a JSON object: {{"title": string, "description": string|null,
-"ingredients": [string], "existing_tags": [string], "vocabulary": [string]}}.
+SUGGEST_MORE_SYSTEM_PROMPT = """You suggest additional tags for under-tagged
+recipes in a database whose target language is {language}. You will receive
+a JSON object: {"vocabulary": [string], "recipes": [{"id": integer,
+"title": string, "description": string|null, "ingredients": [string],
+"existing_tags": [string]}, ...]}.
 
-"existing_tags" are tags this recipe already has (don't repeat these).
-"vocabulary" is a sample of tags already used elsewhere in the collection -
-STRONGLY prefer reusing one of these over inventing a new tag, if it
-genuinely fits; only propose a new one when nothing in the vocabulary applies.
+"vocabulary" is the list of tags already used in the collection - STRONGLY
+prefer reusing one of these over inventing a new tag, if it genuinely fits;
+only propose a new one when nothing in the vocabulary applies.
+"existing_tags" are tags a recipe already has (don't repeat these).
 
-Suggest at most 3 tags, each a short {language} word or phrase in the same
-style as the vocabulary (cuisine, meal type, diet, main ingredient, occasion,
-season - whatever is genuinely obvious from the recipe, not a stretch).
+For each recipe, suggest at most 3 tags, each a short {language} word or
+phrase in the same style as the vocabulary (cuisine, meal type, diet, main
+ingredient, occasion, season - whatever is genuinely obvious from the
+recipe, not a stretch).
 
-Respond with ONLY a JSON array of strings (no explanation, no markdown
-fence), e.g. ["Vegetarisch", "Herbst"]. If nothing fits, respond with [].
+Respond with ONLY a JSON array (no explanation, no markdown fence), one
+element per recipe: {"id": <id>, "tags": [string, ...]}. Use an empty
+"tags" list if nothing fits.
 """
 
 MIN_TAGS_DEFAULT = 5
+# Recipes per AI call. The prompt and the tag vocabulary (the bulk of the
+# input) are sent once per batch instead of once per recipe.
+SUGGEST_MORE_BATCH_SIZE = 20
+MAX_VOCABULARY = 200
+MAX_DESCRIPTION_CHARS = 200
+MAX_INGREDIENTS = 20
+
+
+def _compact_recipe(recipe):
+    """Just enough of a recipe to judge its tags - no steps, a shortened
+    description, and each ingredient name only once."""
+    ingredients = []
+    for step in recipe.get("steps", []):
+        for ing in step.get("ingredients", []):
+            name = (ing.get("food") or {}).get("name")
+            if name and name not in ingredients:
+                ingredients.append(name)
+    description = (recipe.get("description") or "").strip()
+    return {
+        "id": recipe["id"],
+        "title": recipe.get("name", ""),
+        "description": description[:MAX_DESCRIPTION_CHARS] or None,
+        "ingredients": ingredients[:MAX_INGREDIENTS],
+        "existing_tags": [kw["name"] for kw in recipe.get("keywords", [])],
+    }
 
 
 def run_suggest_more_scan(job_id: str) -> None:
@@ -394,45 +422,57 @@ def run_suggest_more_scan(job_id: str) -> None:
 
         with tandoor_client.get_client() as client:
             all_tags = tandoor_client.fetch_all_items(client, "keyword")
-            vocabulary = [t["name"] for t in all_tags][:200]
 
             job.progress_label = "Scanning every recipe's full detail..."
             tool_jobs.save_tool_job(job)
             recipes = fetch_all_recipes_full(client)
             under_tagged = [r for r in recipes if len(r.get("keywords", [])) < MIN_TAGS_DEFAULT]
             job.progress_total = len(under_tagged)
-            job.cost_estimate = format_cost_estimate(len(under_tagged), "per_recipe_small")
+            job.cost_estimate = format_cost_estimate(len(under_tagged), "batched_suggest_tags")
             tool_jobs.save_tool_job(job)
 
+            # Most-used tags first, so the vocabulary cap keeps the ones that
+            # matter instead of whatever sorts first alphabetically.
+            usage = {}
+            for recipe in recipes:
+                for kw in recipe.get("keywords", []):
+                    usage[kw.get("name")] = usage.get(kw.get("name"), 0) + 1
+            vocabulary = sorted((t["name"] for t in all_tags), key=lambda n: -usage.get(n, 0))[:MAX_VOCABULARY]
+
             system_prompt = SUGGEST_MORE_SYSTEM_PROMPT.replace("{language}", settings.output_language)
+            by_id = {r["id"]: r for r in under_tagged}
             suggestions = []
-            for i, recipe in enumerate(under_tagged, 1):
+            batches = list(chunked(under_tagged, SUGGEST_MORE_BATCH_SIZE))
+            for i, batch in enumerate(batches, 1):
                 if job.cancel_requested:
                     break
-                job.progress_current = i
-                job.progress_label = f"Checking recipe {i}/{len(under_tagged)}..."
+                job.progress_label = f"Checking recipes, batch {i}/{len(batches)}..."
                 tool_jobs.save_tool_job(job)
                 try:
-                    ingredients = []
-                    for step in recipe.get("steps", []):
-                        for ing in step.get("ingredients", []):
-                            food = ing.get("food")
-                            if food and food.get("name"):
-                                ingredients.append(food["name"])
                     user_content = json.dumps({
-                        "title": recipe.get("name", ""),
-                        "description": recipe.get("description"),
-                        "ingredients": ingredients,
-                        "existing_tags": [kw["name"] for kw in recipe.get("keywords", [])],
                         "vocabulary": vocabulary,
+                        "recipes": [_compact_recipe(r) for r in batch],
                     }, ensure_ascii=False)
-                    text_out, usage = llm_provider.complete_text(system_prompt, user_content, max_tokens=200)
-                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+                    text_out, usage_info = llm_provider.complete_text(
+                        system_prompt, user_content, max_tokens=60 * len(batch) + 200
+                    )
+                    job.token_usage.input_tokens += getattr(usage_info, "input_tokens", 0) or 0
+                    job.token_usage.output_tokens += getattr(usage_info, "output_tokens", 0) or 0
                     text_out = text_out.strip().strip("`")
                     if text_out.startswith("json"):
                         text_out = text_out[4:]
-                    tags = json.loads(text_out)
+                    answers = json.loads(text_out)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Suggest-more batch %d failed: %s", i, exc)
+                    answers = []
+
+                for answer in answers:
+                    recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+                    if recipe is None:
+                        continue
+                    existing = {kw["name"].strip().lower() for kw in recipe.get("keywords", [])}
+                    tags = [t.strip() for t in answer.get("tags") or [] if isinstance(t, str) and t.strip()]
+                    tags = [t for t in dict.fromkeys(tags) if t.lower() not in existing][:3]
                     if not tags:
                         continue
                     suggestions.append(ToolSuggestion(
@@ -440,8 +480,8 @@ def run_suggest_more_scan(job_id: str) -> None:
                         summary=f"add {tags} to {recipe.get('name', '')!r}",
                         detail={"recipe_id": recipe["id"], "tags": tags},
                     ))
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Suggest-more failed for recipe %s: %s", recipe.get("id"), exc)
+                job.progress_current = min(i * SUGGEST_MORE_BATCH_SIZE, len(under_tagged))
+                tool_jobs.save_tool_job(job)
 
             job.suggestions = suggestions
             job.status = "cancelled" if job.cancel_requested else "ready"

@@ -79,9 +79,10 @@ def print_header(title: str) -> None:
 # magnitude, not an exact quote.
 COST_PROFILES = {
     "chunked_review": {"chunk_size": 80, "input_per_chunk": 1900, "output_per_chunk": 1400},
+    "batched_suggest_tags": {"chunk_size": 20, "input_per_chunk": 3500, "output_per_chunk": 700},  # tag vocabulary sent once per 20 recipes
     "chunked_enrich": {"chunk_size": 40, "input_per_chunk": 1500, "output_per_chunk": 2600},  # plural + nutrition + category, ~65 output tokens per food
     "per_recipe_tiny": {"input_per_item": 150, "output_per_item": 15},      # season check
-    "per_recipe_small": {"input_per_item": 300, "output_per_item": 60},     # suggest-more, metadata, nutrition
+    "per_recipe_small": {"input_per_item": 300, "output_per_item": 60},     # metadata, nutrition (CLI)
     "per_recipe_translate": {"input_per_item": 500, "output_per_item": 500},  # full recipe re-translation
 }
 
