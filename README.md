@@ -137,6 +137,14 @@ All configuration is handled through `.env`.
 
 ---
 
+## 📚 Documentation
+
+The full documentation — how extraction works, every configuration option,
+switching AI providers, and the maintenance tools (🔧 Tools in the web UI and
+[`backend/scripts/`](backend/scripts/)) — is in [DOCUMENTATION.md](DOCUMENTATION.md).
+
+---
+
 ## 🤝 Contributing
 
 Contributions, bug reports, and ideas are welcome.
