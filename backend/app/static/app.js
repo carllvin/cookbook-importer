@@ -898,7 +898,28 @@ el('tools-nav-btn').addEventListener('click', () => {
   el('tools-screen').classList.remove('hidden');
   el('tools-cards-view').classList.remove('hidden');
   el('tools-run-view').classList.add('hidden');
+  loadNewRecipesStatus();
 });
+
+async function loadNewRecipesStatus() {
+  const label = el('new-recipes-status');
+  const btn = el('new-recipes-start-btn');
+  btn.disabled = true;
+  label.textContent = t('toolNewRecipesChecking');
+  try {
+    const res = await fetch('/api/tools/new-recipes/status');
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (data.baseline_created) {
+      label.textContent = tf('toolNewRecipesBaseline', { count: data.baseline_count });
+    } else {
+      label.textContent = data.new_count > 0 ? tf('toolNewRecipesCount', { count: data.new_count }) : t('toolNewRecipesNone');
+    }
+    btn.disabled = data.new_count === 0;
+  } catch (e) {
+    label.textContent = `${t('toolNewRecipesStatusFailed')}: ${e.message}`;
+  }
+}
 
 el('tools-back-btn').addEventListener('click', () => {
   clearTimeout(toolsState.pollTimer);
@@ -907,6 +928,7 @@ el('tools-back-btn').addEventListener('click', () => {
   toolsState.selected.clear();
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
+  loadNewRecipesStatus();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {

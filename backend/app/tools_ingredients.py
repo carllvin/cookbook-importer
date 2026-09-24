@@ -258,7 +258,7 @@ element per ingredient:
 """
 
 
-def _fetch_all_foods_full(client):
+def fetch_all_foods_full(client):
     """Paginated /food/ list. Tandoor's list view already contains
     plural_name and properties, so no per-food GET is needed."""
     foods = []
@@ -275,7 +275,7 @@ def _fetch_all_foods_full(client):
     return foods
 
 
-def _fetch_supermarket_categories(client):
+def fetch_supermarket_categories(client):
     """Existing supermarket categories as [{"id", "name"}]. Empty list if the
     endpoint isn't available - the category part is then simply skipped."""
     try:
@@ -315,11 +315,81 @@ def _describe_enrich(name, plural, nutrition, category):
     return f"{name!r}: " + " · ".join(parts)
 
 
+def enrich_targets(foods, categories) -> list[dict]:
+    """The subset of full food dicts that miss a plural, nutrition, or (when
+    any categories exist to pick from) a supermarket category."""
+    targets = []
+    for food in foods:
+        needs_plural = not (food.get("plural_name") or "").strip()
+        needs_nutrition = not food.get("properties")
+        # No existing categories -> nothing to pick from, so never ask.
+        needs_category = bool(categories) and not food.get("supermarket_category")
+        if needs_plural or needs_nutrition or needs_category:
+            targets.append({"id": food["id"], "name": food["name"], "needs_plural": needs_plural,
+                            "needs_nutrition": needs_nutrition, "needs_category": needs_category})
+    return targets
+
+
+def enrich_suggestions(job, targets, categories) -> list[ToolSuggestion]:
+    """Batched plural/nutrition/category lookup for enrich_targets() output.
+    A proposed plural spelled like the singular is dropped, and only ids of
+    existing categories are accepted. Adds token usage to `job`, stops early
+    on cancel. Shared by the enrich tool and the new-recipes workflow."""
+    categories_by_id = {c["id"]: c for c in categories}
+    by_id = {t["id"]: t for t in targets}
+    system_prompt = ENRICH_SYSTEM_PROMPT.replace("{language}", settings.output_language)
+    suggestions = []
+    chunks = list(chunked(targets, ENRICH_CHUNK_SIZE))
+    for i, chunk in enumerate(chunks, 1):
+        if job.cancel_requested:
+            break
+        job.progress_label = f"Checking ingredient details {i}/{len(chunks)}..."
+        tool_jobs.save_tool_job(job)
+        try:
+            text_out, usage = llm_provider.complete_text(
+                system_prompt,
+                json.dumps({"categories": categories if any(t["needs_category"] for t in chunk) else [],
+                            "ingredients": chunk}, ensure_ascii=False),
+                max_tokens=8000,
+            )
+            job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+            job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+            text_out = text_out.strip().strip("`")
+            if text_out.startswith("json"):
+                text_out = text_out[4:]
+            answers = json.loads(text_out)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Ingredients enrich chunk %d failed: %s", i, exc)
+            answers = []
+
+        for answer in answers:
+            target = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+            if target is None:
+                continue
+            plural = answer.get("plural_name") if target["needs_plural"] else None
+            plural = plural.strip() if isinstance(plural, str) else ""
+            if _same_word(plural, target["name"]):
+                plural = ""  # plural == singular: nothing to add
+            nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
+            # Only accept ids of categories that actually exist.
+            category = categories_by_id.get(answer.get("category_id")) if target["needs_category"] else None
+            if not plural and not nutrition and not category:
+                continue
+            suggestions.append(ToolSuggestion(
+                id=uuid.uuid4().hex[:10], kind="enrich",
+                summary=_describe_enrich(target["name"], plural, nutrition, category),
+                detail={"food_id": target["id"], "plural_name": plural or None, "nutrition": nutrition,
+                        "category": {"id": category["id"], "name": category["name"]} if category else None},
+            ))
+        job.progress_current = min(i * ENRICH_CHUNK_SIZE, len(targets))
+        tool_jobs.save_tool_job(job)
+    return suggestions
+
+
 def run_enrich_scan(job_id: str) -> None:
-    """Finds foods without a plural and/or without any nutrition properties
-    and asks the AI for both in batches of ENRICH_CHUNK_SIZE foods per call.
-    A proposed plural spelled like the singular is dropped - there's nothing
-    to add then. One suggestion per food."""
+    """Finds foods without a plural, nutrition and/or supermarket category
+    and asks the AI for them in batches of ENRICH_CHUNK_SIZE foods per call.
+    One suggestion per food."""
     job = tool_jobs.get_tool_job(job_id)
     if job is None:
         return
@@ -333,70 +403,13 @@ def run_enrich_scan(job_id: str) -> None:
         with tandoor_client.get_client() as client:
             job.progress_label = "Loading ingredients..."
             tool_jobs.save_tool_job(job)
-            categories = _fetch_supermarket_categories(client)
-            categories_by_id = {c["id"]: c for c in categories}
-            targets = []
-            for food in _fetch_all_foods_full(client):
-                needs_plural = not (food.get("plural_name") or "").strip()
-                needs_nutrition = not food.get("properties")
-                # No existing categories -> nothing to pick from, so never ask.
-                needs_category = bool(categories) and not food.get("supermarket_category")
-                if needs_plural or needs_nutrition or needs_category:
-                    targets.append({"id": food["id"], "name": food["name"], "needs_plural": needs_plural,
-                                    "needs_nutrition": needs_nutrition, "needs_category": needs_category})
+            categories = fetch_supermarket_categories(client)
+            targets = enrich_targets(fetch_all_foods_full(client), categories)
             job.progress_total = len(targets)
             job.cost_estimate = format_cost_estimate(len(targets), "chunked_enrich")
             tool_jobs.save_tool_job(job)
 
-            by_id = {t["id"]: t for t in targets}
-            system_prompt = ENRICH_SYSTEM_PROMPT.replace("{language}", settings.output_language)
-            suggestions = []
-            chunks = list(chunked(targets, ENRICH_CHUNK_SIZE))
-            for i, chunk in enumerate(chunks, 1):
-                if job.cancel_requested:
-                    break
-                job.progress_label = f"Checking ingredients {i}/{len(chunks)}..."
-                tool_jobs.save_tool_job(job)
-                try:
-                    text_out, usage = llm_provider.complete_text(
-                        system_prompt,
-                        json.dumps({"categories": categories if any(t["needs_category"] for t in chunk) else [],
-                                    "ingredients": chunk}, ensure_ascii=False),
-                        max_tokens=8000,
-                    )
-                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-                    text_out = text_out.strip().strip("`")
-                    if text_out.startswith("json"):
-                        text_out = text_out[4:]
-                    answers = json.loads(text_out)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Ingredients enrich chunk %d failed: %s", i, exc)
-                    answers = []
-
-                for answer in answers:
-                    target = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
-                    if target is None:
-                        continue
-                    plural = answer.get("plural_name") if target["needs_plural"] else None
-                    plural = plural.strip() if isinstance(plural, str) else ""
-                    if _same_word(plural, target["name"]):
-                        plural = ""  # plural == singular: nothing to add
-                    nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
-                    # Only accept ids of categories that actually exist.
-                    category = categories_by_id.get(answer.get("category_id")) if target["needs_category"] else None
-                    if not plural and not nutrition and not category:
-                        continue
-                    suggestions.append(ToolSuggestion(
-                        id=uuid.uuid4().hex[:10], kind="enrich",
-                        summary=_describe_enrich(target["name"], plural, nutrition, category),
-                        detail={"food_id": target["id"], "plural_name": plural or None, "nutrition": nutrition,
-                                "category": {"id": category["id"], "name": category["name"]} if category else None},
-                    ))
-                job.progress_current = min(i * ENRICH_CHUNK_SIZE, len(targets))
-                tool_jobs.save_tool_job(job)
-
-            job.suggestions = suggestions
+            job.suggestions = enrich_suggestions(job, targets, categories)
             job.status = "cancelled" if job.cancel_requested else "ready"
             job.progress_label = None
             tool_jobs.save_tool_job(job)

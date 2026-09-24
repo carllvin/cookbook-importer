@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
+from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -472,6 +472,7 @@ _TOOL_SCANS = {
     "tags_suggest_more": tools_tags.run_suggest_more_scan,
     "units_review": tools_units.run_scan,
     "recipes_translate": tools_recipes.run_scan,
+    "new_recipes": tools_new_recipes.run_scan,
 }
 
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
@@ -485,6 +486,7 @@ _TOOL_APPLY = {
     "tags_suggest_more": tools_tags.apply_suggestion,
     "units_review": tools_units.apply_suggestion,
     "recipes_translate": tools_recipes.apply_suggestion,
+    "new_recipes": tools_new_recipes.apply_suggestion,
 }
 
 
@@ -539,6 +541,21 @@ async def start_recipes_translate():
     return _start_tool_job("recipes_translate")
 
 
+@app.get("/api/tools/new-recipes/status")
+async def new_recipes_status():
+    """Number of recipes added since the last run. On the very first call
+    this records every existing recipe as already handled (the baseline)."""
+    try:
+        return await asyncio.to_thread(tools_new_recipes.status)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc)}, status_code=200)
+
+
+@app.post("/api/tools/new-recipes/process")
+async def start_new_recipes():
+    return _start_tool_job("new_recipes")
+
+
 @app.get("/api/tools/jobs/{job_id}")
 async def get_tool_job(job_id: str):
     job = tool_jobs.get_tool_job(job_id)
@@ -587,6 +604,7 @@ async def skip_tool_suggestion(job_id: str, suggestion_id: str):
     if suggestion.status == "pending":
         suggestion.status = "skipped"
         tool_jobs.save_tool_job(job)
+        tools_new_recipes.after_action(job)
     return suggestion.model_dump()
 
 

@@ -92,7 +92,7 @@ class ToolJob(BaseModel):
     the two have very different shapes and lifecycles, but polled the same way
     (GET, then act on individual items) from the UI."""
     id: str
-    tool: str  # "ingredients_review" | "ingredients_metadata" | "ingredients_nutrition" | "tags_cleanup" | "tags_simplify" | "tags_translate" | "tags_season" | "tags_suggest_more" | "units_review" | "recipes_translate"
+    tool: str  # "ingredients_review" | "ingredients_metadata" | "ingredients_nutrition" | "tags_cleanup" | "tags_simplify" | "tags_translate" | "tags_season" | "tags_suggest_more" | "units_review" | "recipes_translate" | "ingredients_enrich" | "new_recipes"
     status: str = "scanning"  # scanning | ready | applying | done | cancelled | error
     error: Optional[str] = None
     progress_current: int = 0
@@ -102,5 +102,6 @@ class ToolJob(BaseModel):
     cancel_requested: bool = False  # set by POST .../cancel; the running scan checks this after each chunk/item
     suggestions: list[ToolSuggestion] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    meta: dict = Field(default_factory=dict)  # tool-specific state, e.g. which recipes the new-recipes run covers
     created_at: float = Field(default_factory=time.time)
 

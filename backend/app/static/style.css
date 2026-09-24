@@ -688,6 +688,9 @@ a { color: inherit; }
 .tool-card h3 { margin: 0; font-size: 1rem; }
 .tool-card p { margin: 0 0 8px; color: #8f9689; font-size: 0.85rem; flex-grow: 1; }
 .tool-card-disabled { opacity: 0.55; }
+.tool-card-featured { margin-bottom: 16px; border-color: var(--gold-dim); }
+.tool-card-featured .btn { align-self: flex-start; }
+.new-recipes-status { color: var(--paper) !important; font-weight: 600; }
 .tool-start-btn { align-self: flex-start; padding: 7px 16px; font-size: 0.85rem; }
 
 .tools-run-view { max-width: 720px; }

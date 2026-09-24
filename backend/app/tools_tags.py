@@ -267,8 +267,68 @@ SEASON_LABELS = {
 }
 
 
-def _has_season_tag(recipe):
+def has_season_tag(recipe):
     return any(kw.get("name", "").strip().lower() in SEASON_WORDS for kw in recipe.get("keywords", []))
+
+
+def season_suggestions(job, recipes) -> list[ToolSuggestion]:
+    """Batched season check for the given recipes (callers pass only ones
+    without a season tag). Adds token usage to `job`, stops early on cancel.
+    Shared by the "Tags: add season" tool and the new-recipes workflow."""
+    labels = SEASON_LABELS.get(get_language_code(settings.output_language) or "en", SEASON_LABELS["en"])
+    # Plain replace, not str.format(): the prompt's JSON braces would
+    # otherwise be read as format fields.
+    system_prompt = SEASON_SYSTEM_PROMPT
+    for key, value in (("language", settings.output_language), ("spring", labels[0]),
+                       ("summer", labels[1]), ("autumn", labels[2]), ("winter", labels[3])):
+        system_prompt = system_prompt.replace("{" + key + "}", value)
+    labels_by_lower = {label.lower(): label for label in labels}
+
+    by_id = {r["id"]: r for r in recipes}
+    suggestions = []
+    batches = list(chunked(recipes, SEASON_BATCH_SIZE))
+    for i, batch in enumerate(batches, 1):
+        if job.cancel_requested:
+            break
+        job.progress_label = f"Checking seasons, batch {i}/{len(batches)}..."
+        tool_jobs.save_tool_job(job)
+        try:
+            compact = []
+            for recipe in batch:
+                entry = _compact_recipe(recipe)
+                entry["ingredients"] = entry["ingredients"][:SEASON_MAX_INGREDIENTS]
+                compact.append(entry)
+            answers = _complete_json(job, system_prompt, compact, max_tokens=25 * len(batch) + 100)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Season batch %d failed: %s", i, exc)
+            answers = []
+
+        for answer in answers:
+            recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+            season = answer.get("season") if recipe else None
+            season = labels_by_lower.get(season.strip().strip(".").lower()) if isinstance(season, str) else None
+            if season is None:
+                continue
+            suggestions.append(ToolSuggestion(
+                id=uuid.uuid4().hex[:10], kind="season",
+                summary=f"tag {recipe.get('name', '')!r} as {season!r}",
+                detail={"recipe_id": recipe["id"], "season": season},
+            ))
+        job.progress_current = min(i * SEASON_BATCH_SIZE, len(recipes))
+        tool_jobs.save_tool_job(job)
+    return suggestions
+
+
+def _complete_json(job, system_prompt, payload, max_tokens):
+    """One AI call with a JSON payload; adds token usage to the job and
+    returns the parsed JSON answer."""
+    text_out, usage = llm_provider.complete_text(system_prompt, json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
+    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+    text_out = text_out.strip().strip("`")
+    if text_out.startswith("json"):
+        text_out = text_out[4:]
+    return json.loads(text_out)
 
 
 def run_season_scan(job_id: str) -> None:
@@ -286,62 +346,12 @@ def run_season_scan(job_id: str) -> None:
             job.progress_label = "Scanning every recipe's full detail..."
             tool_jobs.save_tool_job(job)
             recipes = fetch_all_recipes_full(client)
-            missing = [r for r in recipes if not _has_season_tag(r)]
+            missing = [r for r in recipes if not has_season_tag(r)]
             job.progress_total = len(missing)
             job.cost_estimate = format_cost_estimate(len(missing), "batched_season")
             tool_jobs.save_tool_job(job)
 
-            labels = SEASON_LABELS.get(get_language_code(settings.output_language) or "en", SEASON_LABELS["en"])
-            # Plain replace, not str.format(): the prompt's JSON braces would
-            # otherwise be read as format fields.
-            system_prompt = SEASON_SYSTEM_PROMPT
-            for key, value in (("language", settings.output_language), ("spring", labels[0]),
-                               ("summer", labels[1]), ("autumn", labels[2]), ("winter", labels[3])):
-                system_prompt = system_prompt.replace("{" + key + "}", value)
-            labels_by_lower = {label.lower(): label for label in labels}
-
-            by_id = {r["id"]: r for r in missing}
-            suggestions = []
-            batches = list(chunked(missing, SEASON_BATCH_SIZE))
-            for i, batch in enumerate(batches, 1):
-                if job.cancel_requested:
-                    break
-                job.progress_label = f"Checking recipes, batch {i}/{len(batches)}..."
-                tool_jobs.save_tool_job(job)
-                try:
-                    compact = []
-                    for recipe in batch:
-                        entry = _compact_recipe(recipe)
-                        entry["ingredients"] = entry["ingredients"][:SEASON_MAX_INGREDIENTS]
-                        compact.append(entry)
-                    text_out, usage = llm_provider.complete_text(
-                        system_prompt, json.dumps(compact, ensure_ascii=False), max_tokens=25 * len(batch) + 100
-                    )
-                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-                    text_out = text_out.strip().strip("`")
-                    if text_out.startswith("json"):
-                        text_out = text_out[4:]
-                    answers = json.loads(text_out)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Season batch %d failed: %s", i, exc)
-                    answers = []
-
-                for answer in answers:
-                    recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
-                    season = answer.get("season") if recipe else None
-                    season = labels_by_lower.get(season.strip().strip(".").lower()) if isinstance(season, str) else None
-                    if season is None:
-                        continue
-                    suggestions.append(ToolSuggestion(
-                        id=uuid.uuid4().hex[:10], kind="season",
-                        summary=f"tag {recipe.get('name', '')!r} as {season!r}",
-                        detail={"recipe_id": recipe["id"], "season": season},
-                    ))
-                job.progress_current = min(i * SEASON_BATCH_SIZE, len(missing))
-                tool_jobs.save_tool_job(job)
-
-            job.suggestions = suggestions
+            job.suggestions = season_suggestions(job, missing)
             job.status = "cancelled" if job.cancel_requested else "ready"
             job.progress_label = None
             tool_jobs.save_tool_job(job)
@@ -434,6 +444,58 @@ def _compact_recipe(recipe):
     }
 
 
+def tag_vocabulary(all_tags, recipes) -> list[str]:
+    """Existing tag names, most-used first, so the MAX_VOCABULARY cap keeps
+    the ones that matter instead of whatever sorts first alphabetically."""
+    usage = {}
+    for recipe in recipes:
+        for kw in recipe.get("keywords", []):
+            usage[kw.get("name")] = usage.get(kw.get("name"), 0) + 1
+    return sorted((t["name"] for t in all_tags), key=lambda n: -usage.get(n, 0))[:MAX_VOCABULARY]
+
+
+def suggest_tags_suggestions(job, recipes, vocabulary) -> list[ToolSuggestion]:
+    """Batched "suggest more tags" for the given recipes. Adds token usage to
+    `job`, stops early on cancel. Shared by the "Tags: suggest more" tool and
+    the new-recipes workflow."""
+    system_prompt = SUGGEST_MORE_SYSTEM_PROMPT.replace("{language}", settings.output_language)
+    by_id = {r["id"]: r for r in recipes}
+    suggestions = []
+    batches = list(chunked(recipes, SUGGEST_MORE_BATCH_SIZE))
+    for i, batch in enumerate(batches, 1):
+        if job.cancel_requested:
+            break
+        job.progress_label = f"Suggesting tags, batch {i}/{len(batches)}..."
+        tool_jobs.save_tool_job(job)
+        try:
+            answers = _complete_json(
+                job, system_prompt,
+                {"vocabulary": vocabulary, "recipes": [_compact_recipe(r) for r in batch]},
+                max_tokens=60 * len(batch) + 200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Suggest-more batch %d failed: %s", i, exc)
+            answers = []
+
+        for answer in answers:
+            recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+            if recipe is None:
+                continue
+            existing = {kw["name"].strip().lower() for kw in recipe.get("keywords", [])}
+            tags = [t.strip() for t in answer.get("tags") or [] if isinstance(t, str) and t.strip()]
+            tags = [t for t in dict.fromkeys(tags) if t.lower() not in existing][:3]
+            if not tags:
+                continue
+            suggestions.append(ToolSuggestion(
+                id=uuid.uuid4().hex[:10], kind="suggest_tags",
+                summary=f"add {tags} to {recipe.get('name', '')!r}",
+                detail={"recipe_id": recipe["id"], "tags": tags},
+            ))
+        job.progress_current = min(i * SUGGEST_MORE_BATCH_SIZE, len(recipes))
+        tool_jobs.save_tool_job(job)
+    return suggestions
+
+
 def run_suggest_more_scan(job_id: str) -> None:
     job = tool_jobs.get_tool_job(job_id)
     if job is None:
@@ -456,59 +518,7 @@ def run_suggest_more_scan(job_id: str) -> None:
             job.cost_estimate = format_cost_estimate(len(under_tagged), "batched_suggest_tags")
             tool_jobs.save_tool_job(job)
 
-            # Most-used tags first, so the vocabulary cap keeps the ones that
-            # matter instead of whatever sorts first alphabetically.
-            usage = {}
-            for recipe in recipes:
-                for kw in recipe.get("keywords", []):
-                    usage[kw.get("name")] = usage.get(kw.get("name"), 0) + 1
-            vocabulary = sorted((t["name"] for t in all_tags), key=lambda n: -usage.get(n, 0))[:MAX_VOCABULARY]
-
-            system_prompt = SUGGEST_MORE_SYSTEM_PROMPT.replace("{language}", settings.output_language)
-            by_id = {r["id"]: r for r in under_tagged}
-            suggestions = []
-            batches = list(chunked(under_tagged, SUGGEST_MORE_BATCH_SIZE))
-            for i, batch in enumerate(batches, 1):
-                if job.cancel_requested:
-                    break
-                job.progress_label = f"Checking recipes, batch {i}/{len(batches)}..."
-                tool_jobs.save_tool_job(job)
-                try:
-                    user_content = json.dumps({
-                        "vocabulary": vocabulary,
-                        "recipes": [_compact_recipe(r) for r in batch],
-                    }, ensure_ascii=False)
-                    text_out, usage_info = llm_provider.complete_text(
-                        system_prompt, user_content, max_tokens=60 * len(batch) + 200
-                    )
-                    job.token_usage.input_tokens += getattr(usage_info, "input_tokens", 0) or 0
-                    job.token_usage.output_tokens += getattr(usage_info, "output_tokens", 0) or 0
-                    text_out = text_out.strip().strip("`")
-                    if text_out.startswith("json"):
-                        text_out = text_out[4:]
-                    answers = json.loads(text_out)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Suggest-more batch %d failed: %s", i, exc)
-                    answers = []
-
-                for answer in answers:
-                    recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
-                    if recipe is None:
-                        continue
-                    existing = {kw["name"].strip().lower() for kw in recipe.get("keywords", [])}
-                    tags = [t.strip() for t in answer.get("tags") or [] if isinstance(t, str) and t.strip()]
-                    tags = [t for t in dict.fromkeys(tags) if t.lower() not in existing][:3]
-                    if not tags:
-                        continue
-                    suggestions.append(ToolSuggestion(
-                        id=uuid.uuid4().hex[:10], kind="suggest_tags",
-                        summary=f"add {tags} to {recipe.get('name', '')!r}",
-                        detail={"recipe_id": recipe["id"], "tags": tags},
-                    ))
-                job.progress_current = min(i * SUGGEST_MORE_BATCH_SIZE, len(under_tagged))
-                tool_jobs.save_tool_job(job)
-
-            job.suggestions = suggestions
+            job.suggestions = suggest_tags_suggestions(job, under_tagged, tag_vocabulary(all_tags, recipes))
             job.status = "cancelled" if job.cancel_requested else "ready"
             job.progress_label = None
             tool_jobs.save_tool_job(job)

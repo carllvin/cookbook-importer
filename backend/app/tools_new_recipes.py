@@ -1,0 +1,374 @@
+"""Workflow for recipes added since the last run - whether imported through
+this app or added in Tandoor itself (URL import, app, by hand).
+
+Which recipes were already handled is remembered in a small JSON file in the
+data volume. The first time it's needed, every recipe that exists at that
+moment is recorded as handled (the "baseline"), so only recipes added
+afterwards are picked up.
+
+Per run, for the new recipes only:
+1. Translate recipe text into OUTPUT_LANGUAGE - applied automatically.
+2. Match the units, ingredients and tags these recipes introduced against
+   the existing ones (translate / merge into an existing entry).
+3. Fill in plural, nutrition and supermarket category for new ingredients.
+4. Suggest a season tag and further tags.
+Steps 2-4 become suggestions that are applied after review. The recipes are
+recorded as handled once every suggestion is applied or skipped - so if the
+container restarts before that, they simply show up again next time."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+import uuid
+
+from . import llm_provider, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
+from .config import get_language_code, settings
+from .schemas import ToolSuggestion
+from .tandoor_helpers import find_recipes_by_filter, resolve_name_collisions
+
+log = logging.getLogger("tandoor-helper")
+
+_store_lock = threading.Lock()
+
+
+# ---------- Which recipes were already handled ----------
+
+def _store_path() -> str:
+    return os.path.join(settings.data_dir, "processed_recipes.json")
+
+
+def _load_store() -> dict | None:
+    try:
+        with open(_store_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def _save_store(store: dict) -> None:
+    os.makedirs(settings.data_dir, exist_ok=True)
+    tmp = _store_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f)
+    os.replace(tmp, _store_path())  # atomic - never leaves a half-written file
+
+
+def mark_processed(recipe_ids) -> None:
+    with _store_lock:
+        store = _load_store() or {"baseline_at": time.time(), "recipe_ids": []}
+        store["recipe_ids"] = sorted(set(store["recipe_ids"]) | set(recipe_ids))
+        _save_store(store)
+
+
+def list_recipe_ids(client) -> list[int]:
+    ids = []
+    url, params = "/recipe/", {"page_size": 200}
+    for _ in range(200):
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", data) if isinstance(data, dict) else data
+        ids.extend(r["id"] for r in results if r.get("id") is not None)
+        url = data.get("next") if isinstance(data, dict) else None
+        if not url:
+            break
+        params = None
+    return ids
+
+
+def status() -> dict:
+    """How many recipes are new. Creates the baseline on first use: every
+    recipe existing right now counts as already handled."""
+    with tandoor_client.get_client() as client:
+        ids = list_recipe_ids(client)
+    with _store_lock:
+        store = _load_store()
+        if store is None:
+            _save_store({"baseline_at": time.time(), "recipe_ids": sorted(ids)})
+            return {"new_count": 0, "baseline_created": True, "baseline_count": len(ids)}
+    new_ids = set(ids) - set(store["recipe_ids"])
+    return {"new_count": len(new_ids), "baseline_created": False}
+
+
+def _new_recipe_ids(client) -> list[int]:
+    store = _load_store()
+    if store is None:
+        raise tandoor_client.TandoorError("No baseline yet - open the tools page once first.")
+    done = set(store["recipe_ids"])
+    return [rid for rid in list_recipe_ids(client) if rid not in done]
+
+
+# ---------- Matching new units/ingredients/tags against existing ones ----------
+
+MATCH_SYSTEM_PROMPT = """You keep a home cook's {entity} list clean. The target
+language is {language}. You will receive a JSON object {"existing": [names
+of ALL current entries], "new": [{"id": integer, "name": string}, ...]}.
+The "new" entries were just introduced by newly added recipes.
+
+For each "new" entry decide:
+- It means the same as a DIFFERENT entry in "existing" (other language,
+  singular/plural, spelling variant, {variants}) -> merge it into that one:
+  {"id": <id>, "match_name": <that existing name, exactly as listed>}
+- Otherwise, if its name isn't a clean {language} {entity_singular} name
+  ({style}) -> {"id": <id>, "new_name": <clean {language} name>}
+- Otherwise leave it out.
+
+Be conservative with merges: only when it's genuinely the same thing, not
+merely related. Respond with ONLY a JSON array (no explanation, no markdown
+fence). If nothing needs a change, respond with [].
+"""
+
+ENTITY_RULES = {
+    "food": dict(entity="ingredient", entity_singular="ingredient",
+                 variants='a prepared form like "gehackte Zwiebel" of "Zwiebel"',
+                 style="a plain, singular base noun, not a prepared form"),
+    "unit": dict(entity="unit-of-measure", entity_singular="unit",
+                 variants='an abbreviation like "tbsp" / "Esslöffel" / "EL"',
+                 style="the conventional short form used in recipes, e.g. g, ml, EL, TL, Stück"),
+    "keyword": dict(entity="recipe tag", entity_singular="tag",
+                    variants='a synonym like "Nachtisch" / "Dessert" or "cakes" / "Kuchen"',
+                    style="a short word or phrase in recipe-tag style"),
+}
+ENTITY_LABEL = {"food": "ingredient", "unit": "unit", "keyword": "tag"}
+
+
+def _match_actions(job, entity, candidates, all_items) -> list[dict]:
+    """One AI call comparing `candidates` against all existing items. Returns
+    validated rename/merge actions (collision-resolved, consolidated)."""
+    if not candidates:
+        return []
+    prompt = MATCH_SYSTEM_PROMPT
+    for key, value in {**ENTITY_RULES[entity], "language": settings.output_language}.items():
+        prompt = prompt.replace("{" + key + "}", value)
+    answers = tools_tags._complete_json(
+        job, prompt,
+        {"existing": [i["name"] for i in all_items], "new": [{"id": c["id"], "name": c["name"]} for c in candidates]},
+        max_tokens=60 * len(candidates) + 200,
+    )
+    by_name = {}
+    for item in all_items:
+        by_name.setdefault(item["name"].strip().lower(), item)
+    candidate_ids = {c["id"] for c in candidates}
+
+    actions = []
+    for answer in answers if isinstance(answers, list) else []:
+        if not isinstance(answer, dict) or answer.get("id") not in candidate_ids:
+            continue
+        if isinstance(answer.get("match_name"), str):
+            match = by_name.get(answer["match_name"].strip().lower())
+            if match and match["id"] != answer["id"]:
+                actions.append({"type": "merge", "keep_id": match["id"], "keep_name": match["name"],
+                                "remove_ids": [answer["id"]]})
+        elif isinstance(answer.get("new_name"), str) and answer["new_name"].strip():
+            actions.append({"type": "rename", "id": answer["id"], "new_name": answer["new_name"].strip()})
+    return resolve_name_collisions(actions, all_items)
+
+
+def _describe(entity, action, by_id):
+    label = ENTITY_LABEL[entity]
+    if action["type"] == "rename":
+        return f"{label}: rename {by_id.get(action['id'], {}).get('name', '?')!r} -> {action['new_name']!r}"
+    removed = ", ".join(repr(by_id.get(rid, {}).get("name", "?")) for rid in action["remove_ids"])
+    return f"{label}: merge {removed} into {by_id.get(action['keep_id'], {}).get('name', '?')!r} -> {action['keep_name']!r}"
+
+
+def _only_used_by(client, filter_param, item_id, recipe_ids) -> bool:
+    """True if every recipe using this food/keyword is one of the new ones -
+    i.e. the entry was introduced by them, not an established one."""
+    return all(r["id"] in recipe_ids for r in find_recipes_by_filter(client, filter_param, item_id))
+
+
+# ---------- The scan ----------
+
+def run_scan(job_id: str) -> None:
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        return
+    try:
+        if not llm_provider.is_configured():
+            job.status = "error"
+            job.error = llm_provider.missing_key_hint()
+            tool_jobs.save_tool_job(job)
+            return
+
+        with tandoor_client.get_client() as client:
+            job.progress_label = "Looking for new recipes..."
+            tool_jobs.save_tool_job(job)
+            new_ids = _new_recipe_ids(client)
+            job.meta["recipe_ids"] = new_ids
+            job.progress_total = len(new_ids)
+            recipes = []
+            for rid in new_ids:
+                resp = client.get(f"/recipe/{rid}/")
+                if resp.status_code == 200:
+                    recipes.append(resp.json())
+            job.cost_estimate = (
+                f"{len(recipes)} new recipe(s): up to one AI call per recipe needing translation, "
+                f"plus a few batched calls for ingredients, units and tags."
+            )
+            tool_jobs.save_tool_job(job)
+            suggestions: list[ToolSuggestion] = []
+
+            # 1. Translate - applied right away.
+            expected_code = get_language_code(settings.output_language)
+            for i, recipe in enumerate(list(recipes)):
+                if job.cancel_requested:
+                    break
+                if tools_recipes.already_in_target_language(recipe, expected_code):
+                    continue
+                job.progress_label = f"Translating {recipe.get('name', '')!r}..."
+                tool_jobs.save_tool_job(job)
+                suggestion = ToolSuggestion(id=uuid.uuid4().hex[:10], kind="translate_recipe",
+                                            summary=f"recipe: translate {recipe.get('name', '')!r}")
+                try:
+                    translated, usage = tools_recipes.translate_recipe_text(recipe, settings.output_language)
+                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+                    suggestion.summary = f"recipe: translated {recipe.get('name', '')!r} -> {translated['title']!r}"
+                    suggestion.preview = tools_recipes.describe_changes(recipe, translated)
+                    resp = client.patch(f"/recipe/{recipe['id']}/", json=tools_recipes.build_update_payload(recipe, translated))
+                    if resp.status_code not in (200, 201):
+                        raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+                    suggestion.status = "applied"
+                    fresh = client.get(f"/recipe/{recipe['id']}/")
+                    if fresh.status_code == 200:
+                        recipes[i] = fresh.json()
+                except Exception as exc:  # noqa: BLE001
+                    suggestion.status = "error"
+                    suggestion.error = f"Translation failed: {exc}"
+                suggestions.append(suggestion)
+            recipe_ids = {r["id"] for r in recipes}
+
+            # 2. Match units, ingredients and tags against the existing ones.
+            removed_food_ids = set()
+            # Name each entry will have once the suggestions are applied, so
+            # later steps judge the final name (e.g. no plural "Lauch" for an
+            # ingredient about to be renamed from "leek" to "Lauch").
+            final_names = {"food": {}, "keyword": {}}
+            if not job.cancel_requested:
+                job.progress_label = "Comparing units, ingredients and tags with existing ones..."
+                tool_jobs.save_tool_job(job)
+
+                used = {"food": {}, "unit": {}, "keyword": {}}
+                for recipe in recipes:
+                    for kw in recipe.get("keywords", []):
+                        used["keyword"][kw["id"]] = kw
+                    for step in recipe.get("steps", []):
+                        for ing in step.get("ingredients", []):
+                            for entity in ("food", "unit"):
+                                ref = ing.get(entity)
+                                if ref and ref.get("id") is not None:
+                                    used[entity][ref["id"]] = ref
+
+                candidates = {
+                    # Units have no recipe filter in Tandoor's API, and the
+                    # list is small - so all units of the new recipes go in.
+                    "unit": list(used["unit"].values()),
+                    "food": [f for f in used["food"].values() if _only_used_by(client, "foods", f["id"], recipe_ids)],
+                    "keyword": [k for k in used["keyword"].values()
+                                if _only_used_by(client, "keywords", k["id"], recipe_ids)],
+                }
+                for entity in ("unit", "food", "keyword"):
+                    if job.cancel_requested or not candidates[entity]:
+                        continue
+                    all_items = tandoor_client.fetch_all_items(client, entity)
+                    by_id = {item["id"]: item for item in all_items}
+                    try:
+                        actions = _match_actions(job, entity, candidates[entity], all_items)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Matching %s failed: %s", entity, exc)
+                        continue
+                    for action in actions:
+                        if entity == "food" and action["type"] == "merge":
+                            removed_food_ids.update(action["remove_ids"])
+                        if entity in final_names:
+                            if action["type"] == "rename":
+                                final_names[entity][action["id"]] = action["new_name"]
+                            else:
+                                for item_id in [action["keep_id"], *action["remove_ids"]]:
+                                    final_names[entity][item_id] = action["keep_name"]
+                        suggestions.append(ToolSuggestion(
+                            id=uuid.uuid4().hex[:10], kind=action["type"],
+                            summary=_describe(entity, action, by_id), detail={**action, "entity": entity},
+                        ))
+
+                # 3. Plural / nutrition / category for the new ingredients
+                # that stay (not merged away).
+                keep_food_ids = {f["id"] for f in candidates["food"]} - removed_food_ids
+                if keep_food_ids and not job.cancel_requested:
+                    foods = []
+                    for food_id in keep_food_ids:
+                        resp = client.get(f"/food/{food_id}/")
+                        if resp.status_code == 200:
+                            food = resp.json()
+                            foods.append({**food, "name": final_names["food"].get(food_id, food["name"])})
+                    categories = tools_ingredients.fetch_supermarket_categories(client)
+                    targets = tools_ingredients.enrich_targets(foods, categories)
+                    suggestions += tools_ingredients.enrich_suggestions(job, targets, categories)
+
+                # 4. Season + more tags for the new recipes, judged by their
+                # tags' final names.
+                recipes = [
+                    {**r, "keywords": [{**kw, "name": final_names["keyword"].get(kw["id"], kw["name"])}
+                                       for kw in r.get("keywords", [])]}
+                    for r in recipes
+                ]
+                if not job.cancel_requested:
+                    suggestions += tools_tags.season_suggestions(
+                        job, [r for r in recipes if not tools_tags.has_season_tag(r)]
+                    )
+                if not job.cancel_requested:
+                    all_tags = tandoor_client.fetch_all_items(client, "keyword")
+                    suggestions += tools_tags.suggest_tags_suggestions(
+                        job, recipes, tools_tags.tag_vocabulary(all_tags, recipes)
+                    )
+
+            job.suggestions = suggestions
+            job.status = "cancelled" if job.cancel_requested else "ready"
+            job.progress_label = None
+            tool_jobs.save_tool_job(job)
+            after_action(job)
+
+    except Exception as exc:  # noqa: BLE001
+        log.exception("New-recipes scan failed for job %s", job_id)
+        job.status = "error"
+        job.error = str(exc)
+        tool_jobs.save_tool_job(job)
+
+
+def after_action(job) -> None:
+    """Records the job's recipes as handled once nothing is left pending
+    (called after the scan and after every apply/skip). A cancelled run
+    never counts - it may have stopped before looking at everything."""
+    if job.tool != "new_recipes" or job.status != "ready" or job.meta.get("marked"):
+        return
+    if any(s.status == "pending" for s in job.suggestions):
+        return
+    mark_processed(job.meta.get("recipe_ids", []))
+    job.meta["marked"] = True
+    tool_jobs.save_tool_job(job)
+
+
+def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
+    """Routes each suggestion to the tool that already knows how to apply it."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise tandoor_client.TandoorError("Job not found.")
+    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
+    if suggestion is None:
+        raise tandoor_client.TandoorError("Suggestion not found.")
+
+    entity = suggestion.detail.get("entity")
+    if entity == "food":
+        result = tools_ingredients.apply_suggestion(job_id, suggestion_id)
+    elif entity == "unit":
+        result = tools_units.apply_suggestion(job_id, suggestion_id)
+    elif suggestion.kind == "enrich":
+        result = tools_ingredients.apply_enrich_suggestion(job_id, suggestion_id)
+    else:  # keyword rename/merge, season, suggest_tags
+        result = tools_tags.apply_suggestion(job_id, suggestion_id)
+    after_action(job)
+    return result
