@@ -236,20 +236,27 @@ SEASON_WORDS = {
     "winter", "hiver", "inverno", "invierno",
 }
 
-SEASON_SYSTEM_PROMPT = """You decide whether a recipe clearly belongs to one
-season, the same way a cookbook-import tool would when first extracting it.
-You will receive a JSON object: {{"title": string, "description": string|null,
-"tags": [string]}}.
+SEASON_SYSTEM_PROMPT = """You decide whether recipes clearly belong to one
+season, the same way a cookbook-import tool would when first extracting
+them. You will receive a JSON array of recipes, each {"id": integer,
+"title": string, "description": string|null, "ingredients": [string],
+"existing_tags": [string]}.
 
-If the recipe clearly fits one season - based on its main ingredients (e.g.
+A recipe clearly fits one season if its main ingredients say so (e.g.
 asparagus/strawberries -> Spring, pumpkin/mushrooms -> Autumn, mulled
-wine/cookies -> Winter) or an explicit mention - respond with that season,
-translated into {language}, as ONLY that one word (no explanation, no
-punctuation): one of "{spring}", "{summer}", "{autumn}", "{winter}".
+wine/cookies -> Winter) or it's mentioned explicitly. Then answer that
+season, translated into {language}: one of "{spring}", "{summer}",
+"{autumn}", "{winter}". An everyday dish available year-round with no clear
+seasonal tie (e.g. pasta with tomato sauce) gets null.
 
-If it's an everyday dish available year-round with no clear seasonal tie
-(e.g. pasta with tomato sauce), respond with exactly: none
+Respond with ONLY a JSON array (no explanation, no markdown fence), one
+element per recipe: {"id": <id>, "season": <one of the four words, or null>}
 """
+
+# Recipes per AI call for the season check - the answer per recipe is tiny,
+# so the prompt is the main input cost and is now sent once per batch.
+SEASON_BATCH_SIZE = 25
+SEASON_MAX_INGREDIENTS = 10
 
 SEASON_LABELS = {
     "de": ("Frühling", "Sommer", "Herbst", "Winter"),
@@ -281,40 +288,58 @@ def run_season_scan(job_id: str) -> None:
             recipes = fetch_all_recipes_full(client)
             missing = [r for r in recipes if not _has_season_tag(r)]
             job.progress_total = len(missing)
-            job.cost_estimate = format_cost_estimate(len(missing), "per_recipe_tiny")
+            job.cost_estimate = format_cost_estimate(len(missing), "batched_season")
             tool_jobs.save_tool_job(job)
 
             labels = SEASON_LABELS.get(get_language_code(settings.output_language) or "en", SEASON_LABELS["en"])
-            system_prompt = SEASON_SYSTEM_PROMPT.format(
-                language=settings.output_language, spring=labels[0], summer=labels[1], autumn=labels[2], winter=labels[3]
-            )
+            # Plain replace, not str.format(): the prompt's JSON braces would
+            # otherwise be read as format fields.
+            system_prompt = SEASON_SYSTEM_PROMPT
+            for key, value in (("language", settings.output_language), ("spring", labels[0]),
+                               ("summer", labels[1]), ("autumn", labels[2]), ("winter", labels[3])):
+                system_prompt = system_prompt.replace("{" + key + "}", value)
+            labels_by_lower = {label.lower(): label for label in labels}
 
+            by_id = {r["id"]: r for r in missing}
             suggestions = []
-            for i, recipe in enumerate(missing, 1):
+            batches = list(chunked(missing, SEASON_BATCH_SIZE))
+            for i, batch in enumerate(batches, 1):
                 if job.cancel_requested:
                     break
-                job.progress_current = i
-                job.progress_label = f"Checking recipe {i}/{len(missing)}..."
+                job.progress_label = f"Checking recipes, batch {i}/{len(batches)}..."
                 tool_jobs.save_tool_job(job)
                 try:
-                    user_content = json.dumps({
-                        "title": recipe.get("name", ""),
-                        "description": recipe.get("description"),
-                        "tags": [kw["name"] for kw in recipe.get("keywords", [])],
-                    }, ensure_ascii=False)
-                    text_out, usage = llm_provider.complete_text(system_prompt, user_content, max_tokens=20)
+                    compact = []
+                    for recipe in batch:
+                        entry = _compact_recipe(recipe)
+                        entry["ingredients"] = entry["ingredients"][:SEASON_MAX_INGREDIENTS]
+                        compact.append(entry)
+                    text_out, usage = llm_provider.complete_text(
+                        system_prompt, json.dumps(compact, ensure_ascii=False), max_tokens=25 * len(batch) + 100
+                    )
                     job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
                     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-                    season = text_out.strip().strip(".").strip()
-                    if season.lower() == "none" or season not in labels:
+                    text_out = text_out.strip().strip("`")
+                    if text_out.startswith("json"):
+                        text_out = text_out[4:]
+                    answers = json.loads(text_out)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Season batch %d failed: %s", i, exc)
+                    answers = []
+
+                for answer in answers:
+                    recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
+                    season = answer.get("season") if recipe else None
+                    season = labels_by_lower.get(season.strip().strip(".").lower()) if isinstance(season, str) else None
+                    if season is None:
                         continue
                     suggestions.append(ToolSuggestion(
                         id=uuid.uuid4().hex[:10], kind="season",
                         summary=f"tag {recipe.get('name', '')!r} as {season!r}",
                         detail={"recipe_id": recipe["id"], "season": season},
                     ))
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Season check failed for recipe %s: %s", recipe.get("id"), exc)
+                job.progress_current = min(i * SEASON_BATCH_SIZE, len(missing))
+                tool_jobs.save_tool_job(job)
 
             job.suggestions = suggestions
             job.status = "cancelled" if job.cancel_requested else "ready"
