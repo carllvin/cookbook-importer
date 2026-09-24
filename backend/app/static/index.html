@@ -78,6 +78,14 @@
         <div id="tools-run-usage" class="tools-run-usage hidden"></div>
         <div id="tools-cancelled-note" class="tools-cancelled-note hidden" data-i18n="toolCancelledNote">Cancelled - suggestions found so far are shown below.</div>
         <div id="tools-run-error" class="error-banner hidden"></div>
+        <div id="tools-bulk-bar" class="tools-bulk-bar hidden">
+          <label class="tools-select-all"><input type="checkbox" id="tools-select-all"> <span data-i18n="toolSelectAll">Select all</span></label>
+          <span id="tools-bulk-status" class="tools-bulk-status"></span>
+          <div class="tools-bulk-actions">
+            <button id="tools-skip-selected-btn" class="btn secondary" type="button" disabled></button>
+            <button id="tools-apply-selected-btn" class="btn" type="button" disabled></button>
+          </div>
+        </div>
         <div id="tools-suggestions-list" class="tools-suggestions-list"></div>
       </div>
     </div>

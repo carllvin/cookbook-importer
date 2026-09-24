@@ -745,3 +745,24 @@ a { color: inherit; }
   .cookbook-bar { flex-wrap: wrap; }
   .cookbook-bar input { width: 100%; max-width: none; }
 }
+
+.tools-bulk-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  border: 1px solid #2a2f2a;
+  border-radius: var(--radius);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--ink);
+}
+.tools-select-all { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.88rem; }
+.tools-bulk-status { font-size: 0.82rem; color: #8f9689; flex: 1; }
+.tools-bulk-actions { display: flex; gap: 8px; margin-left: auto; }
+.tools-bulk-actions button { padding: 6px 14px; font-size: 0.8rem; }
+.tool-suggestion-row.pending { cursor: pointer; }
+.tool-suggestion-row .suggestion-check { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
