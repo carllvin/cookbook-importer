@@ -12,6 +12,22 @@ Tandoor collection: merging duplicate ingredients/units/tags, translating
 them into your target language, filling in missing metadata, and more - see
 [`backend/scripts/`](backend/scripts/) for the full list.
 
+<p align="center">
+  <img src="screenshots/main_page.png" alt="Main page" width="85%">
+</p>
+
+<p align="center">
+  <img src="screenshots/preview_page_1.png" alt="Recipe preview" width="85%">
+</p>
+
+<p align="center">
+  <img src="screenshots/preview_page_2.png" alt="Recipe preview" width="85%">
+</p>
+
+<p align="center">
+  <img src="screenshots/succesful_import.png" alt="Successful Tandoor import" width="85%">
+</p>
+
 ## Setup
 
 1. **Create `.env`**
