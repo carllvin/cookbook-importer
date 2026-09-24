@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title data-i18n="pageTitle">Tandoor Helper</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="brand" id="brand-link" role="button" tabindex="0"><em>Tandoor</em> Helper</div>
+      <div id="topbar-badges">
+        <div id="usage-badge" class="usage-badge hidden"></div>
+        <button id="tools-nav-btn" class="tandoor-badge tools-nav-btn" type="button" data-i18n="toolsNavBtn">🔧 Tools</button>
+        <div id="tandoor-badge" class="tandoor-badge" data-i18n="tandoorChecking">Checking Tandoor …</div>
+      </div>
+    </div>
+    <div id="tandoor-error-banner" class="tandoor-error-banner hidden"></div>
+
+    <!-- Tools -->
+    <div id="tools-screen" class="tools-screen hidden">
+      <div id="tools-cards-view">
+        <h1 data-i18n="toolsHeadline">Maintenance tools</h1>
+        <p class="lede" data-i18n="toolsLede">
+          These work directly on your existing Tandoor data, independent of
+          importing a new cookbook. Every tool shows its suggestions first -
+          nothing is changed until you approve it.
+        </p>
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div class="tool-card-icon">🥕</div>
+            <h3 data-i18n="toolIngredientsReviewTitle">Ingredients: review &amp; clean up</h3>
+            <p data-i18n="toolIngredientsReviewDesc">Fixes prepared-form names, translates, and merges duplicates.</p>
+            <button class="btn tool-start-btn" data-tool="ingredients_review" data-endpoint="/api/tools/ingredients/review" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">🏷️</div>
+            <h3 data-i18n="toolTagsSimplifyTitle">Tags: simplify</h3>
+            <p data-i18n="toolTagsSimplifyDesc">AI-merges tags that mean the same thing.</p>
+            <button class="btn tool-start-btn" data-tool="tags_simplify" data-endpoint="/api/tools/tags/simplify" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">🏷️</div>
+            <h3 data-i18n="toolTagsTranslateTitle">Tags: translate</h3>
+            <p data-i18n="toolTagsTranslateDesc">Translates tags not already in your output language.</p>
+            <button class="btn tool-start-btn" data-tool="tags_translate" data-endpoint="/api/tools/tags/translate" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">🍂</div>
+            <h3 data-i18n="toolTagsSeasonTitle">Tags: add season</h3>
+            <p data-i18n="toolTagsSeasonDesc">Backfills a season tag on recipes missing one.</p>
+            <button class="btn tool-start-btn" data-tool="tags_season" data-endpoint="/api/tools/tags/season" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">➕</div>
+            <h3 data-i18n="toolTagsSuggestMoreTitle">Tags: suggest more</h3>
+            <p data-i18n="toolTagsSuggestMoreDesc">Suggests extra tags for recipes with very few.</p>
+            <button class="btn tool-start-btn" data-tool="tags_suggest_more" data-endpoint="/api/tools/tags/suggest-more" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">📏</div>
+            <h3 data-i18n="toolUnitsTitle">Units: review &amp; clean up</h3>
+            <p data-i18n="toolUnitsDesc">Unifies spellings, translates, and fills in missing plurals.</p>
+            <button class="btn tool-start-btn" data-tool="units_review" data-endpoint="/api/tools/units/review" data-i18n="toolStartBtn">Start</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tools-run-view" class="tools-run-view hidden">
+        <button id="tools-back-btn" class="btn secondary" data-i18n="toolsBackBtn">← Back to tools</button>
+        <h2 id="tools-run-title"></h2>
+        <div id="tools-run-progress" class="tools-run-progress hidden">
+          <div class="spinner"></div>
+          <div id="tools-run-progress-label" class="status-text"></div>
+          <button id="tools-cancel-btn" class="btn secondary tools-cancel-btn" type="button" data-i18n="toolCancelBtn">Cancel</button>
+        </div>
+        <div id="tools-run-usage" class="tools-run-usage hidden"></div>
+        <div id="tools-cancelled-note" class="tools-cancelled-note hidden" data-i18n="toolCancelledNote">Cancelled - suggestions found so far are shown below.</div>
+        <div id="tools-run-error" class="error-banner hidden"></div>
+        <div id="tools-suggestions-list" class="tools-suggestions-list"></div>
+      </div>
+    </div>
+
+    <!-- Upload -->
+    <div id="upload-screen" class="upload-screen">
+      <h1 data-i18n="uploadHeadline">Turn your cookbook into a recipe database</h1>
+      <p class="lede" data-i18n="uploadLede">
+        Upload a PDF, an EPUB, or photos of pages. The AI reads every page,
+        detects individual recipes with ingredients, times and images – then
+        you choose what goes into Tandoor.
+      </p>
+      <label id="dropzone" class="dropzone">
+        <span class="icon">📖</span>
+        <div><strong data-i18n="dropzoneTitle">Drop files here</strong> <span data-i18n="dropzoneSubtitle">or click to choose</span></div>
+        <div class="dropzone-hint" data-i18n="dropzoneHint">One PDF or EPUB, or several photos of pages (JPEG, PNG, HEIC)</div>
+        <input id="file-input" type="file" accept=".pdf,.epub,.jpg,.jpeg,.png,.heic,.heif" multiple />
+      </label>
+      <div id="upload-error" class="error-banner hidden" style="margin-top:18px;"></div>
+    </div>
+
+    <!-- Processing -->
+    <div id="processing-screen" class="processing-screen hidden">
+      <div class="spinner"></div>
+      <div class="status-text" id="processing-text" data-i18n="processingDefault">Reading PDF …</div>
+      <div class="progress-track hidden" id="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+    </div>
+
+    <!-- Review -->
+    <div id="review-screen" class="review-screen hidden">
+      <div class="cookbook-bar">
+        <label for="cookbook-name-input" data-i18n="cookbookLabel">Cookbook in Tandoor</label>
+        <input id="cookbook-name-input" type="text" data-i18n-placeholder="cookbookPlaceholder" placeholder="Cookbook name …" />
+        <span class="cookbook-hint" data-i18n="cookbookHint">Will be created if it does not exist yet.</span>
+      </div>
+      <div class="recipe-list">
+        <div class="recipe-list-header">
+          <span id="recipe-count-label">0</span>
+          <button id="toggle-all-btn" class="btn secondary" style="padding:4px 10px;font-size:0.78rem;" data-i18n="toggleAll">all</button>
+        </div>
+        <div class="recipe-list-kbd-hint" data-i18n="keyboardHint">↑↓ navigate · Space select/deselect</div>
+        <div id="recipe-list-items"></div>
+      </div>
+      <div class="recipe-detail" id="recipe-detail">
+        <p style="color:#8f9689;" data-i18n="selectRecipeHint">Select a recipe on the left.</p>
+      </div>
+      <div id="action-bar" class="action-bar hidden">
+        <span class="count" id="selection-count">0</span>
+        <div class="action-bar-buttons">
+          <button id="undo-all-btn" class="btn secondary hidden" data-i18n="undoAllBtn">Undo all imports</button>
+          <button id="retry-failed-btn" class="btn secondary hidden" data-i18n="retryFailedBtn">Retry failed</button>
+          <button id="import-btn" class="btn" data-i18n="importBtn">Import to Tandoor</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import result popup -->
+  <div id="success-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-icon" id="modal-icon">🎉</div>
+      <h2 id="modal-title">Imported successfully!</h2>
+      <p id="modal-body" class="modal-body"></p>
+      <div class="modal-actions">
+        <button id="modal-close-btn" class="btn secondary" data-i18n="modalClose">Close</button>
+        <button id="modal-new-upload-btn" class="btn" data-i18n="modalNewUpload">Upload another PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/i18n.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

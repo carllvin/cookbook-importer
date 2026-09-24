@@ -1,0 +1,617 @@
+from __future__ import annotations
+
+import asyncio
+import difflib
+import io
+import logging
+import os
+import shutil
+import threading
+import uuid
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+
+from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_tags, tools_units
+from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
+from .config import settings, get_ui_language_code
+from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
+from .image_processor import SUPPORTED_IMAGE_EXTENSIONS, process_images
+from .pdf_processor import process_pdf
+from .schemas import ExtractedRecipe
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("tandoor-helper")
+
+app = FastAPI(title="Tandoor Helper")
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+DUPLICATE_SIMILARITY_THRESHOLD = 0.82  # titles scoring at or above this (0-1) count as "similar"
+CLEANUP_INTERVAL_SECONDS = 3600        # how often the background cleanup task runs
+PDF_EXTENSIONS = {".pdf"}
+
+
+def _job_dir(job_id: str) -> str:
+    return os.path.join(settings.data_dir, job_id)
+
+
+def _mark_duplicates(job) -> None:
+    """Fetches all existing Tandoor recipe names once and flags recipes with an
+    exact/very similar title match. Non-fatal: if the request fails (e.g. Tandoor
+    not configured/reachable) it's simply skipped - the import itself doesn't
+    depend on this."""
+    if not settings.check_duplicates:
+        return
+    try:
+        with tandoor_client.get_client() as client:
+            existing_names = tandoor_client.fetch_all_recipe_names(client)
+    except Exception as exc:  # noqa: BLE001
+        log.info("Duplicate check skipped (Tandoor unreachable/not configured): %s", exc)
+        return
+
+    if not existing_names:
+        return
+
+    existing_lower = {n.strip().lower(): n for n in existing_names if n.strip()}
+
+    for recipe in job.recipes:
+        title_norm = recipe.title.strip().lower()
+        if not title_norm:
+            continue
+
+        if title_norm in existing_lower:
+            recipe.duplicate_match = existing_lower[title_norm]
+            recipe.duplicate_exact = True
+            recipe.selected = False  # deselect exact matches as a precaution
+            continue
+
+        best_ratio = 0.0
+        best_name = None
+        for norm, original in existing_lower.items():
+            ratio = difflib.SequenceMatcher(None, title_norm, norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_name = original
+        if best_ratio >= DUPLICATE_SIMILARITY_THRESHOLD:
+            recipe.duplicate_match = best_name
+            recipe.duplicate_exact = False
+            # only a similar match: leave it selected, just warn
+
+
+def _fetch_existing_tags() -> list[str] | None:
+    """Fetches existing Tandoor keywords once, so the extraction prompt can ask the
+    AI to prefer reusing them. Non-fatal: returns None if unavailable/disabled."""
+    if not settings.reuse_existing_tags:
+        return None
+    try:
+        with tandoor_client.get_client() as client:
+            return tandoor_client.fetch_all_keyword_names(client)
+    except Exception as exc:  # noqa: BLE001
+        log.info("Tag reuse lookup skipped (Tandoor unreachable/not configured): %s", exc)
+        return None
+
+
+def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_ocr: bool = False) -> None:
+    job = jobs.get_job(job_id)
+    if job is None:
+        return
+    try:
+        images_dir = os.path.join(_job_dir(job_id), "images")
+
+        if doc_type == "pdf":
+            job.progress_label = "Reading PDF …"
+            jobs.save_job(job)
+            result = process_pdf(source_paths[0], images_dir, force_ocr=force_ocr)
+        elif doc_type == "epub":
+            job.progress_label = "Reading EPUB …"
+            jobs.save_job(job)
+            result = process_epub(source_paths[0], images_dir)
+        elif doc_type == "images":
+            job.progress_label = "Running OCR on uploaded photo(s) …"
+            jobs.save_job(job)
+            result = process_images(source_paths, images_dir)
+        else:
+            raise ValueError(f"Unknown document type: {doc_type}")
+
+        job.page_count = result["page_count"]
+        job.images = {
+            iid: {"page": info["page"], "filename": info["filename"]}
+            for iid, info in result["images"].items()
+        }
+        jobs.save_job(job)
+
+        def progress_cb(idx: int, total: int, page_start: int, page_end: int) -> None:
+            job.progress_current = idx
+            job.progress_total = total
+            page_range = f"page {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
+            job.progress_label = f"Analyzed {page_range} ({idx}/{total})"
+            jobs.save_job(job)
+
+        existing_tags = _fetch_existing_tags()
+        toc_pages = result.get("toc_pages") if settings.toc_aware_chunking else None
+
+        recipes: list[ExtractedRecipe]
+        recipes, usage = extract_recipes_from_pages(
+            result["pages"],
+            on_progress=progress_cb,
+            toc_pages=toc_pages,
+            existing_tags=existing_tags,
+        )
+        job.recipes = recipes
+        job.token_usage.add(usage)
+        jobs.match_images_to_recipes(job)
+
+        job.progress_label = "Determining cookbook title …"
+        jobs.save_job(job)
+        guess, title_usage = guess_cookbook_title(
+            result["pages"], job.filename, metadata_title=result.get("metadata_title", "")
+        )
+        job.token_usage.add(title_usage)
+        job.suggested_cookbook_name = guess
+        job.cookbook_name = guess
+
+        job.progress_label = "Checking for duplicates already in Tandoor …"
+        jobs.save_job(job)
+        _mark_duplicates(job)
+
+        job.status = "ready"
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Extraction failed for job %s", job_id)
+        job.status = "error"
+        job.error = str(exc)
+    finally:
+        jobs.save_job(job)
+
+
+def _classify_upload(filenames: list[str]) -> tuple[str, str]:
+    """Determines the document type from the uploaded filenames' extensions.
+    Returns (doc_type, error_message) - error_message is '' when valid."""
+    if not filenames:
+        return "", "No file was uploaded."
+
+    exts = [os.path.splitext(f)[1].lower() for f in filenames]
+
+    if len(filenames) == 1 and exts[0] in PDF_EXTENSIONS:
+        return "pdf", ""
+    if len(filenames) == 1 and exts[0] in SUPPORTED_EPUB_EXTENSIONS:
+        return "epub", ""
+    if exts and all(e in SUPPORTED_IMAGE_EXTENSIONS for e in exts):
+        return "images", ""
+    if len(filenames) > 1 and any(e in PDF_EXTENSIONS | SUPPORTED_EPUB_EXTENSIONS for e in exts):
+        return "", "Only one PDF or EPUB can be uploaded at a time (but multiple photos are fine)."
+
+    supported = ", ".join(sorted(PDF_EXTENSIONS | SUPPORTED_EPUB_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS))
+    return "", f"Unsupported file type. Supported: {supported}"
+
+
+@app.post("/api/upload")
+async def upload_files(files: list[UploadFile] = File(...)):
+    filenames = [f.filename or "" for f in files]
+    doc_type, error = _classify_upload(filenames)
+    if error:
+        raise HTTPException(400, error)
+
+    display_name = filenames[0] if len(filenames) == 1 else f"{len(filenames)} photos"
+    job = jobs.create_job(display_name)
+    job_dir = _job_dir(job.id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    source_paths = []
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    total_size = 0
+
+    for index, upload in enumerate(files):
+        ext = os.path.splitext(upload.filename or "")[1].lower()
+        dest_path = os.path.join(job_dir, f"source_{index:03d}{ext}")
+        with open(dest_path, "wb") as out:
+            while chunk := await upload.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > max_bytes:
+                    out.close()
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    raise HTTPException(413, f"Upload larger than {settings.max_upload_mb} MB.")
+                out.write(chunk)
+        source_paths.append(dest_path)
+
+    jobs.save_job(job)
+    threading.Thread(target=_run_extraction, args=(job.id, source_paths, doc_type, settings.force_ocr), daemon=True).start()
+
+    return {"job_id": job.id}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+    return job.model_dump()
+
+
+@app.get("/api/jobs/{job_id}/images/{image_id}")
+async def get_job_image(job_id: str, image_id: str):
+    job = jobs.get_job(job_id)
+    if job is None or image_id not in job.images:
+        raise HTTPException(404, "Image not found.")
+    filename = job.images[image_id]["filename"]
+    path = os.path.join(_job_dir(job_id), "images", filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Image file is missing.")
+    return FileResponse(path)
+
+
+@app.put("/api/jobs/{job_id}/recipes/{recipe_id}")
+async def update_recipe(job_id: str, recipe_id: str, payload: dict = Body(...)):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+    for i, r in enumerate(job.recipes):
+        if r.id == recipe_id:
+            updated = r.model_copy(update=payload)
+            job.recipes[i] = updated
+            jobs.save_job(job)
+            return updated.model_dump()
+    raise HTTPException(404, "Recipe not found.")
+
+
+@app.put("/api/jobs/{job_id}")
+async def update_job(job_id: str, payload: dict = Body(...)):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+    allowed_fields = {"cookbook_name"}
+    for key, value in payload.items():
+        if key in allowed_fields:
+            setattr(job, key, value)
+    jobs.save_job(job)
+    return job.model_dump()
+
+
+@app.post("/api/jobs/{job_id}/import")
+async def import_selected(job_id: str, body: dict = Body(default={})):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+
+    recipe_ids = body.get("recipe_ids")  # None = import all selected recipes
+    to_import = [
+        r for r in job.recipes
+        if (recipe_ids is None and r.selected) or (recipe_ids is not None and r.id in recipe_ids)
+    ]
+
+    cookbook_name = (body.get("cookbook_name") or job.cookbook_name or "").strip()
+    if cookbook_name:
+        job.cookbook_name = cookbook_name
+        jobs.save_job(job)
+
+    results = []
+    cookbook_warning = None
+
+    try:
+        with tandoor_client.get_client() as client:
+            cookbook_id = None
+            cookbook_endpoint = None
+            if cookbook_name:
+                try:
+                    cookbook_id, cookbook_endpoint = tandoor_client.get_or_create_cookbook(client, cookbook_name)
+                except tandoor_client.TandoorError as exc:
+                    cookbook_warning = str(exc)
+                    log.warning("Could not create cookbook: %s", exc)
+
+            for recipe in to_import:
+                recipe.import_status = "importing"
+                jobs.save_job(job)
+
+                image_path = None
+                if recipe.selected_image_id and recipe.selected_image_id in job.images:
+                    image_path = os.path.join(
+                        _job_dir(job_id), "images", job.images[recipe.selected_image_id]["filename"]
+                    )
+
+                warnings: list[str] = []
+                try:
+                    tandoor_id = tandoor_client.create_recipe(client, recipe)
+                    recipe.tandoor_recipe_id = tandoor_id
+
+                    if image_path and os.path.exists(image_path):
+                        try:
+                            tandoor_client.upload_image(client, tandoor_id, image_path)
+                        except tandoor_client.TandoorError as exc:
+                            warnings.append(f"Image upload failed: {exc}")
+
+                    if cookbook_id is not None:
+                        try:
+                            tandoor_client.add_recipe_to_cookbook(client, cookbook_id, cookbook_endpoint, tandoor_id)
+                        except tandoor_client.TandoorError as exc:
+                            warnings.append(str(exc))
+
+                    recipe.import_status = "imported"
+                    recipe.import_error = "; ".join(warnings) if warnings else None
+                except Exception as exc:  # noqa: BLE001
+                    recipe.import_status = "error"
+                    recipe.import_error = str(exc)
+                    log.warning("Import failed for recipe %s: %s", recipe.title, exc)
+
+                results.append({
+                    "id": recipe.id,
+                    "status": recipe.import_status,
+                    "tandoor_recipe_id": recipe.tandoor_recipe_id,
+                    "error": recipe.import_error,
+                })
+                jobs.save_job(job)
+
+    except tandoor_client.TandoorError as exc:
+        # e.g. TANDOOR_URL/TANDOOR_TOKEN missing entirely -> mark all affected recipes as failed
+        for recipe in to_import:
+            recipe.import_status = "error"
+            recipe.import_error = str(exc)
+            results.append({
+                "id": recipe.id, "status": "error",
+                "tandoor_recipe_id": None, "error": str(exc),
+            })
+        jobs.save_job(job)
+
+    return {"results": results, "cookbook_name": cookbook_name or None, "cookbook_warning": cookbook_warning}
+
+
+@app.post("/api/jobs/{job_id}/recipes/{recipe_id}/undo-import")
+async def undo_import(job_id: str, recipe_id: str):
+    """Deletes a previously imported recipe from Tandoor again and resets its
+    status to 'pending' here, so it can be edited and re-imported if desired."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+
+    recipe = next((r for r in job.recipes if r.id == recipe_id), None)
+    if recipe is None:
+        raise HTTPException(404, "Recipe not found.")
+    if recipe.import_status != "imported" or not recipe.tandoor_recipe_id:
+        raise HTTPException(400, "This recipe hasn't been imported (or was already undone).")
+
+    try:
+        with tandoor_client.get_client() as client:
+            tandoor_client.delete_recipe(client, recipe.tandoor_recipe_id)
+    except tandoor_client.TandoorError as exc:
+        raise HTTPException(502, f"Could not undo the import: {exc}")
+
+    recipe.import_status = "pending"
+    recipe.tandoor_recipe_id = None
+    recipe.import_error = None
+    jobs.save_job(job)
+
+    return recipe.model_dump()
+
+
+@app.post("/api/jobs/{job_id}/undo-all-imports")
+async def undo_all_imports(job_id: str):
+    """Bulk version of undo-import: deletes every imported recipe in this job
+    from Tandoor again and resets each back to 'pending'. Recipes that failed
+    to undo keep their 'imported' status so nothing is silently lost."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+
+    imported = [r for r in job.recipes if r.import_status == "imported" and r.tandoor_recipe_id]
+    if not imported:
+        raise HTTPException(400, "No imported recipes to undo in this job.")
+
+    results = []
+    try:
+        with tandoor_client.get_client() as client:
+            for recipe in imported:
+                try:
+                    tandoor_client.delete_recipe(client, recipe.tandoor_recipe_id)
+                    recipe.import_status = "pending"
+                    recipe.tandoor_recipe_id = None
+                    recipe.import_error = None
+                    results.append({"id": recipe.id, "status": "undone", "error": None})
+                except tandoor_client.TandoorError as exc:
+                    results.append({"id": recipe.id, "status": "error", "error": str(exc)})
+    except tandoor_client.TandoorError as exc:
+        raise HTTPException(502, f"Could not undo imports: {exc}")
+
+    jobs.save_job(job)
+    return {"results": results}
+
+
+@app.post("/api/jobs/{job_id}/recipes/{recipe_id}/generate-image")
+async def generate_recipe_image(job_id: str, recipe_id: str):
+    """Generates an AI recipe photo (for recipes with no photo from the source
+    document, or simply as an alternative) and adds it as a candidate image."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+
+    recipe = next((r for r in job.recipes if r.id == recipe_id), None)
+    if recipe is None:
+        raise HTTPException(404, "Recipe not found.")
+
+    if not image_gen.is_configured():
+        raise HTTPException(400, image_gen.missing_key_hint())
+
+    prompt = image_gen.build_recipe_image_prompt(recipe.title, recipe.description, recipe.tags)
+    try:
+        image_bytes = image_gen.generate_image(prompt)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Image generation failed: {exc}")
+
+    images_dir = os.path.join(_job_dir(job_id), "images")
+    os.makedirs(images_dir, exist_ok=True)
+    image_id = uuid.uuid4().hex[:12]
+    filename = f"{image_id}.png"
+    out_path = os.path.join(images_dir, filename)
+    with open(out_path, "wb") as f:
+        f.write(image_bytes)
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.width, img.height
+    except Exception:  # noqa: BLE001
+        width, height = 0, 0
+
+    job.images[image_id] = {"page": recipe.source_page_start, "filename": filename}
+    recipe.candidate_image_ids = list(recipe.candidate_image_ids) + [image_id]
+    recipe.selected_image_id = image_id
+    jobs.save_job(job)
+
+    return {"image_id": image_id, "recipe": recipe.model_dump()}
+
+
+# ---------- Maintenance tools (ingredients/tags/units cleanup against live Tandoor data) ----------
+
+# tool name -> (job kind saved on the ToolJob, the scan function to run in a background thread)
+_TOOL_SCANS = {
+    "ingredients_review": tools_ingredients.run_scan,
+    "tags_simplify": tools_tags.run_simplify_scan,
+    "tags_translate": tools_tags.run_translate_scan,
+    "tags_season": tools_tags.run_season_scan,
+    "tags_suggest_more": tools_tags.run_suggest_more_scan,
+    "units_review": tools_units.run_scan,
+}
+
+# tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
+_TOOL_APPLY = {
+    "ingredients_review": tools_ingredients.apply_suggestion,
+    "tags_simplify": tools_tags.apply_suggestion,
+    "tags_translate": tools_tags.apply_suggestion,
+    "tags_season": tools_tags.apply_suggestion,
+    "tags_suggest_more": tools_tags.apply_suggestion,
+    "units_review": tools_units.apply_suggestion,
+}
+
+
+def _start_tool_job(tool: str):
+    job = tool_jobs.create_tool_job(tool)
+    threading.Thread(target=_TOOL_SCANS[tool], args=(job.id,), daemon=True).start()
+    return {"job_id": job.id}
+
+
+@app.post("/api/tools/ingredients/review")
+async def start_ingredients_review():
+    return _start_tool_job("ingredients_review")
+
+
+@app.post("/api/tools/tags/simplify")
+async def start_tags_simplify():
+    return _start_tool_job("tags_simplify")
+
+
+@app.post("/api/tools/tags/translate")
+async def start_tags_translate():
+    return _start_tool_job("tags_translate")
+
+
+@app.post("/api/tools/tags/season")
+async def start_tags_season():
+    return _start_tool_job("tags_season")
+
+
+@app.post("/api/tools/tags/suggest-more")
+async def start_tags_suggest_more():
+    return _start_tool_job("tags_suggest_more")
+
+
+@app.post("/api/tools/units/review")
+async def start_units_review():
+    return _start_tool_job("units_review")
+
+
+@app.get("/api/tools/jobs/{job_id}")
+async def get_tool_job(job_id: str):
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Tool job not found.")
+    return job.model_dump()
+
+
+@app.post("/api/tools/jobs/{job_id}/cancel")
+async def cancel_tool_job(job_id: str):
+    """Cooperative cancel: just sets a flag on the job. The running scan loop
+    (see tool_jobs.check_cancelled) checks it after each chunk/item and stops
+    itself there - a Python thread can't be killed from the outside, and
+    stopping mid-AI-call would risk leaving the job in a half-written state,
+    so this only takes effect at the next safe checkpoint rather than
+    instantly."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Tool job not found.")
+    if job.status == "scanning":
+        job.cancel_requested = True
+        tool_jobs.save_tool_job(job)
+    return job.model_dump()
+
+
+@app.post("/api/tools/jobs/{job_id}/suggestions/{suggestion_id}/apply")
+async def apply_tool_suggestion(job_id: str, suggestion_id: str):
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Tool job not found.")
+    apply_fn = _TOOL_APPLY.get(job.tool)
+    if apply_fn is None:
+        raise HTTPException(400, f"Unknown tool: {job.tool}")
+    suggestion = apply_fn(job_id, suggestion_id)
+    return suggestion.model_dump()
+
+
+@app.post("/api/tools/jobs/{job_id}/suggestions/{suggestion_id}/skip")
+async def skip_tool_suggestion(job_id: str, suggestion_id: str):
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Tool job not found.")
+    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
+    if suggestion is None:
+        raise HTTPException(404, "Suggestion not found.")
+    if suggestion.status == "pending":
+        suggestion.status = "skipped"
+        tool_jobs.save_tool_job(job)
+    return suggestion.model_dump()
+
+
+@app.get("/api/config")
+async def get_config():
+    return {
+        "language_code": get_ui_language_code(settings.output_language),
+        "output_language": settings.output_language,
+        "convert_to_metric": settings.convert_to_metric,
+        "check_duplicates": settings.check_duplicates,
+        "supported_extensions": sorted(PDF_EXTENSIONS | SUPPORTED_EPUB_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS),
+        "image_extensions": sorted(SUPPORTED_IMAGE_EXTENSIONS),
+        "image_gen_available": image_gen.is_configured(),
+        # Base URL only (never the token) - lets the UI link straight to an
+        # imported recipe in Tandoor. None when Tandoor isn't configured at all.
+        "tandoor_url": settings.tandoor_url.rstrip("/") if settings.tandoor_url else None,
+    }
+
+
+@app.get("/api/tandoor/status")
+async def tandoor_status():
+    try:
+        tandoor_client.test_connection()
+        return {"connected": True}
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"connected": False, "error": str(exc)}, status_code=200)
+
+
+# ---------- Housekeeping: periodically delete old jobs and their uploaded files ----------
+
+async def _cleanup_loop() -> None:
+    while True:
+        try:
+            jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+        except Exception:  # noqa: BLE001
+            log.exception("Background cleanup failed")
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    # Run once immediately (covers jobs left over from a previous container run),
+    # then keep running in the background for as long as the app is up.
+    jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+    asyncio.create_task(_cleanup_loop())
+
+
+# Mount the static frontend last, so /api/* routes take precedence
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
