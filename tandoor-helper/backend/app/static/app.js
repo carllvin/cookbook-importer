@@ -1020,7 +1020,10 @@ function renderToolSuggestions(job) {
 
   list.innerHTML = job.suggestions.map((s) => `
     <div class="tool-suggestion-row ${s.status}" data-suggestion-id="${s.id}">
-      <span class="suggestion-text">${escapeHtml(s.summary)}</span>
+      <div class="suggestion-text">
+        ${escapeHtml(s.summary)}
+        ${s.preview ? `<details class="suggestion-preview"><summary>${t('toolShowPreview')}</summary><pre>${escapeHtml(s.preview)}</pre></details>` : ''}
+      </div>
       ${s.status === 'pending' ? `
         <div class="suggestion-actions">
           <button class="btn secondary suggestion-skip-btn" type="button">${t('toolSkipBtn')}</button>

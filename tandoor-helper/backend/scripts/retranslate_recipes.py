@@ -10,11 +10,15 @@ skipped automatically - no AI call is made for them, so re-running this
 after a partial run, or on a collection that's already mostly in the target
 language, doesn't cost anything for the recipes that don't need it.
 
-Only the recipe's OWN text is touched: title, description, and step
-instructions. Ingredient/unit/tag NAMES are deliberately left alone - those
+Only the recipe's OWN text is touched: title, description, step titles and
+instructions, and the recipe-specific ingredient notes (e.g. "finely
+chopped"). Ingredient/unit/tag NAMES are deliberately left alone - those
 are shared entities used by many other recipes too, and translating a shared
 food's name would silently change how it displays everywhere else, which is
 a much bigger and riskier operation than this script is meant for.
+
+The same tool is available in the web UI (🔧 Tools -> "Recipes: translate");
+both share the logic in app/tools_recipes.py.
 
 💰 Uses AI tokens: one real API call per recipe that isn't already in the
 target language (same provider/model as AI_PROVIDER). Token usage prints as
@@ -30,7 +34,6 @@ Usage (run inside the container, from the backend/ directory):
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -39,97 +42,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import llm_provider, tandoor_client  # noqa: E402
 from app.config import get_language_code, settings  # noqa: E402
 from app.tandoor_client import TandoorError  # noqa: E402
+from app.tools_recipes import (  # noqa: E402
+    already_in_target_language,
+    build_update_payload,
+    describe_changes,
+    translate_recipe_text,
+)
 from scripts._shared import TokenTracker, fetch_all_recipes_full, format_cost_estimate, print_header  # noqa: E402
-
-SYSTEM_PROMPT = """You translate cookbook recipe text into {language}.
-
-You will receive a JSON object with "title", "description" (may be null),
-and "steps" (a list of instruction strings). Translate every text value
-naturally into {language}, preserving meaning and a natural recipe-writing
-tone - not a literal word-for-word translation.
-
-CRITICAL: some step instructions contain Jinja template placeholders like
-"{{ ingredients[0] }}" or "{{ scale(200) }}" or Jinja comments like
-"{# note #}". Leave every such {{ ... }} or {# ... #} block EXACTLY as
-written, character for character, including its exact index number - only
-translate the surrounding prose text around it.
-
-Respond with ONLY a JSON object of the same shape - "title", "description",
-"steps" (same number of steps, same order) - no explanation, no markdown
-code fence.
-"""
-
-
-def recipe_text_blob(recipe: dict) -> str:
-    parts = [recipe.get("name") or "", recipe.get("description") or ""]
-    parts += [s.get("instruction") or "" for s in recipe.get("steps", [])]
-    return " ".join(p for p in parts if p).strip()
-
-
-def already_in_target_language(recipe: dict, expected_code: str | None) -> bool:
-    """Best-effort language check via langdetect, so a recipe already in the
-    target language costs no AI call at all. If the code can't tell (too
-    little text, or OUTPUT_LANGUAGE isn't one langdetect recognizes), this
-    returns False - safer to translate unnecessarily than to silently skip a
-    recipe that actually needed it."""
-    if not expected_code:
-        return False
-    text = recipe_text_blob(recipe)
-    if len(text) < 8:
-        return False
-    try:
-        from langdetect import detect
-        return detect(text) == expected_code
-    except Exception:  # noqa: BLE001 - langdetect raises its own exception type for "can't tell"
-        return False
-
-
-def translate_recipe_text(recipe: dict, language: str):
-    payload = {
-        "title": recipe.get("name", ""),
-        "description": recipe.get("description"),
-        "steps": [s.get("instruction", "") for s in recipe.get("steps", [])],
-    }
-    # Plain replace, not str.format(): the prompt's own {{ ... }} / {# ... #}
-    # Jinja examples would otherwise be misread as format fields.
-    system_prompt = SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
-        system_prompt, json.dumps(payload, ensure_ascii=False), max_tokens=4000
-    )
-    text_out = text_out.strip()
-    if text_out.startswith("```"):
-        text_out = text_out.strip("`")
-        if text_out.startswith("json"):
-            text_out = text_out[4:]
-    result = json.loads(text_out)
-    if len(result.get("steps", [])) != len(payload["steps"]):
-        raise ValueError(
-            f"Translation returned {len(result.get('steps', []))} step(s), expected {len(payload['steps'])} - "
-            f"refusing to apply this (would misalign steps and their ingredients)."
-        )
-    return result, usage
-
-
-def build_update_payload(recipe: dict, translated: dict) -> dict:
-    new_steps = []
-    for step, new_instruction in zip(recipe.get("steps", []), translated["steps"]):
-        new_step = dict(step)
-        new_step["instruction"] = new_instruction
-        # Ingredients are preserved completely untouched, including food/unit -
-        # this script never touches them.
-        new_step["ingredients"] = [dict(ing) for ing in step.get("ingredients", [])]
-        for ing in new_step["ingredients"]:
-            for field in ("food", "unit"):
-                ref = ing.get(field)
-                if ref is not None:
-                    ing[field] = {"id": ref["id"], "name": ref.get("name", "")}
-        new_steps.append(new_step)
-
-    return {
-        "name": translated["title"][:128],
-        "description": (translated.get("description") or "")[:512],
-        "steps": new_steps,
-    }
 
 
 def run(keyword_filter: str | None, preview_count: int, apply: bool) -> None:
@@ -196,11 +115,8 @@ def run(keyword_filter: str | None, preview_count: int, apply: bool) -> None:
                 errors += 1
                 continue
 
-            print(f"  title:  {recipe.get('name', '')!r}\n      -> {translated['title']!r}")
-            if recipe.get("description") or translated.get("description"):
-                print(f"  descr:  {recipe.get('description')!r}\n      -> {translated.get('description')!r}")
-            for old_step, new_instruction in zip(recipe.get("steps", []), translated["steps"]):
-                print(f"  step:   {old_step.get('instruction', '')!r}\n      -> {new_instruction!r}")
+            for line in (describe_changes(recipe, translated) or "(no changes)").splitlines():
+                print(f"  {line}")
             print(tracker.progress_line())
 
             if preview_count:

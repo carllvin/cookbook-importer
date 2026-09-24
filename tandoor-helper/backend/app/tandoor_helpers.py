@@ -272,7 +272,8 @@ def resolve_name_collisions(actions: list[dict], items: list[dict]) -> list[dict
     `actions` should already be pre-filtered with validate_actions() - this
     function assumes every action has the fields its type requires. `items`
     is the FULL list of existing {"id", "name", ...} entities (not just the
-    chunk that produced `actions`)."""
+    chunk that produced `actions`). The result is run through
+    consolidate_actions(), so no entry appears in more than one action."""
     name_to_id: dict[str, int] = {}
     id_to_name: dict[int, str] = {}
     for item in items:
@@ -330,4 +331,113 @@ def resolve_name_collisions(actions: list[dict], items: list[dict]) -> list[dict
         else:
             resolved.append(action)
 
-    return resolved
+    return consolidate_actions(resolved)
+
+
+def _action_ids(action: dict) -> set[int]:
+    if action["type"] == "merge":
+        return {action["keep_id"], *action["remove_ids"]}
+    return {action["id"]}
+
+
+def _action_target_name(action: dict) -> str | None:
+    if action["type"] == "merge":
+        return action["keep_name"].strip().lower()
+    if action["type"] == "rename":
+        return action["new_name"].strip().lower()
+    return None
+
+
+def consolidate_actions(actions: list[dict]) -> list[dict]:
+    """Folds rename/merge actions that touch the same entry, or that end up
+    with the same target name, into ONE merge. Without this, the same entry
+    shows up in two suggestions (e.g. "merge 'cakes' into 'Kuchen'" and
+    "merge 'cakes', 'cake' into 'Kuchen'" - one from the AI directly, the
+    other created by resolve_name_collisions, or from two different chunks);
+    applying the first deletes 'cakes', and the second then fails with a 404
+    trying to delete it again. Grouping also catches two chunks that each
+    renamed a different entry to the same brand-new name, which would
+    otherwise crash on Tandoor's uniqueness constraint.
+
+    set_plural actions are kept as-is unless their entry gets merged away
+    (then there's nothing left to set a plural on)."""
+    groupable = [a for a in actions if a["type"] in ("rename", "merge")]
+    others = [a for a in actions if a["type"] not in ("rename", "merge")]
+
+    parent = list(range(len(groupable)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner_by_key: dict = {}
+    for idx, action in enumerate(groupable):
+        keys = [("id", i) for i in _action_ids(action)]
+        target = _action_target_name(action)
+        if target:
+            keys.append(("name", target))
+        for key in keys:
+            if key in owner_by_key:
+                parent[find(idx)] = find(owner_by_key[key])
+            else:
+                owner_by_key[key] = idx
+
+    groups: dict[int, list[dict]] = {}
+    for idx, action in enumerate(groupable):
+        groups.setdefault(find(idx), []).append(action)
+
+    consolidated = []
+    for root in sorted(groups):
+        group = groups[root]
+        if len(group) == 1:
+            consolidated.append(group[0])
+            continue
+        all_ids: list[int] = []
+        for action in group:
+            for i in sorted(_action_ids(action)):
+                if i not in all_ids:
+                    all_ids.append(i)
+        merges = [a for a in group if a["type"] == "merge"]
+        if not merges and len(all_ids) == 1:
+            consolidated.append(group[0])  # the same rename proposed twice
+            continue
+        if merges:
+            # The keep_id most merges agree on wins - resolve_name_collisions
+            # sets it to the entry that already owns the target name, so
+            # that's the one that must survive.
+            keep_counts: dict[int, int] = {}
+            for m in merges:
+                keep_counts[m["keep_id"]] = keep_counts.get(m["keep_id"], 0) + 1
+            keep_id = max(keep_counts, key=lambda k: (keep_counts[k], -all_ids.index(k)))
+            keep_name = next(m["keep_name"] for m in merges if m["keep_id"] == keep_id)
+        else:
+            keep_id = group[0]["id"]
+            keep_name = group[0]["new_name"]
+        consolidated.append({
+            "type": "merge", "keep_id": keep_id, "keep_name": keep_name,
+            "remove_ids": [i for i in all_ids if i != keep_id],
+        })
+
+    removed = {rid for a in consolidated if a["type"] == "merge" for rid in a["remove_ids"]}
+    consolidated.extend(a for a in others if a.get("id") not in removed)
+    return consolidated
+
+
+def entity_exists(client: httpx.Client, entity: str, entity_id: int) -> bool:
+    """GET /<entity>/<id>/ - False on 404. Used before merging so an entry
+    that an earlier suggestion in the same run already merged away is simply
+    skipped instead of failing the whole merge."""
+    resp = client.get(f"/{entity}/{entity_id}/")
+    if resp.status_code == 404:
+        return False
+    resp.raise_for_status()
+    return True
+
+
+def delete_entity(client: httpx.Client, entity: str, entity_id: int) -> None:
+    """DELETE /<entity>/<id>/, treating 404 (already gone) as success."""
+    resp = client.delete(f"/{entity}/{entity_id}/")
+    if resp.status_code not in (200, 202, 204, 404):
+        raise RuntimeError(f"Could not delete {entity} #{entity_id}: {resp.status_code} {resp.text[:200]}")

@@ -728,6 +728,10 @@ a { color: inherit; }
   background: rgba(239,233,218,0.02);
 }
 .tool-suggestion-row .suggestion-text { font-size: 0.9rem; }
+.tool-suggestion-row .suggestion-text { min-width: 0; flex: 1; }
+.tool-suggestion-row .suggestion-preview { margin-top: 6px; font-size: 0.78rem; color: #8f9689; }
+.tool-suggestion-row .suggestion-preview summary { cursor: pointer; }
+.tool-suggestion-row .suggestion-preview pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-family: inherit; }
 .tool-suggestion-row .suggestion-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .tool-suggestion-row .suggestion-actions button { padding: 5px 12px; font-size: 0.78rem; }
 .tool-suggestion-row.applied { border-color: var(--green); opacity: 0.7; }

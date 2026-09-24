@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_tags, tools_units
+from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -464,21 +464,25 @@ async def generate_recipe_image(job_id: str, recipe_id: str):
 # tool name -> (job kind saved on the ToolJob, the scan function to run in a background thread)
 _TOOL_SCANS = {
     "ingredients_review": tools_ingredients.run_scan,
+    "tags_cleanup": tools_tags.run_cleanup_scan,
     "tags_simplify": tools_tags.run_simplify_scan,
     "tags_translate": tools_tags.run_translate_scan,
     "tags_season": tools_tags.run_season_scan,
     "tags_suggest_more": tools_tags.run_suggest_more_scan,
     "units_review": tools_units.run_scan,
+    "recipes_translate": tools_recipes.run_scan,
 }
 
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
 _TOOL_APPLY = {
     "ingredients_review": tools_ingredients.apply_suggestion,
+    "tags_cleanup": tools_tags.apply_suggestion,
     "tags_simplify": tools_tags.apply_suggestion,
     "tags_translate": tools_tags.apply_suggestion,
     "tags_season": tools_tags.apply_suggestion,
     "tags_suggest_more": tools_tags.apply_suggestion,
     "units_review": tools_units.apply_suggestion,
+    "recipes_translate": tools_recipes.apply_suggestion,
 }
 
 
@@ -491,6 +495,11 @@ def _start_tool_job(tool: str):
 @app.post("/api/tools/ingredients/review")
 async def start_ingredients_review():
     return _start_tool_job("ingredients_review")
+
+
+@app.post("/api/tools/tags/cleanup")
+async def start_tags_cleanup():
+    return _start_tool_job("tags_cleanup")
 
 
 @app.post("/api/tools/tags/simplify")
@@ -516,6 +525,11 @@ async def start_tags_suggest_more():
 @app.post("/api/tools/units/review")
 async def start_units_review():
     return _start_tool_job("units_review")
+
+
+@app.post("/api/tools/recipes/translate")
+async def start_recipes_translate():
+    return _start_tool_job("recipes_translate")
 
 
 @app.get("/api/tools/jobs/{job_id}")

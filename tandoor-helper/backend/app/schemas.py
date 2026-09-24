@@ -81,6 +81,7 @@ class ToolSuggestion(BaseModel):
     kind: str  # e.g. "rename" | "merge" | "set_plural" | "tag" | "season"
     summary: str  # human-readable one-liner shown in the list, e.g. "merge 'Onion' into 'Zwiebel'"
     detail: dict = Field(default_factory=dict)  # the raw action payload the apply step needs
+    preview: Optional[str] = None  # optional multi-line before/after, shown expandable under the summary
     status: str = "pending"  # pending | applied | skipped | error
     error: Optional[str] = None
 
@@ -91,7 +92,7 @@ class ToolJob(BaseModel):
     the two have very different shapes and lifecycles, but polled the same way
     (GET, then act on individual items) from the UI."""
     id: str
-    tool: str  # "ingredients_review" | "ingredients_metadata" | "ingredients_nutrition" | "tags_simplify" | "tags_translate" | "tags_season" | "tags_suggest_more" | "units"
+    tool: str  # "ingredients_review" | "ingredients_metadata" | "ingredients_nutrition" | "tags_cleanup" | "tags_simplify" | "tags_translate" | "tags_season" | "tags_suggest_more" | "units_review" | "recipes_translate"
     status: str = "scanning"  # scanning | ready | applying | done | cancelled | error
     error: Optional[str] = None
     progress_current: int = 0
