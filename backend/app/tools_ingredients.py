@@ -221,6 +221,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
 # ---------- Enrich: fill in missing plural + nutrition ----------
 
 ENRICH_CHUNK_SIZE = 40
+SUPERMARKET_CATEGORY_ENDPOINT = "supermarket-category"
 PROPERTY_TYPE_ENDPOINT_CANDIDATES = ["property-type", "food-property-type", "propertytype"]
 NUTRIENTS = [  # (Tandoor property type name, unit, key in the AI's answer)
     ("Energy", "kcal", "energy_kcal"),
@@ -231,10 +232,11 @@ NUTRIENTS = [  # (Tandoor property type name, unit, key in the AI's answer)
 
 ENRICH_SYSTEM_PROMPT = """You fill in missing data for ingredient entries in
 a home cook's database. The language is {language}. You will receive a JSON
-array, each element {"id": integer, "name": string, "needs_plural": bool,
-"needs_nutrition": bool}.
+object {"categories": [{"id": integer, "name": string}, ...], "ingredients":
+[...]}, each ingredient {"id": integer, "name": string, "needs_plural": bool,
+"needs_nutrition": bool, "needs_category": bool}.
 
-For every element, answer:
+For every ingredient, answer:
 - "plural_name" (only if needs_plural): the plural of the name in
   {language}, e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier". Use null if the
   plural is spelled exactly like the singular (e.g. "Zucker", "Messer") or
@@ -245,10 +247,14 @@ For every element, answer:
   per 100 ml for liquids (then basis "ml"). Use well-known reference values
   (USDA-style), rounded sensibly. Use null if the name is too vague to
   estimate (e.g. "Gewürzmischung nach Wahl").
+- "category_id" (only if needs_category): the id of the supermarket
+  category from "categories" where you'd find this ingredient when shopping.
+  ONLY use an id from that list - never invent a category. Use null if none
+  of them genuinely fits.
 
 Respond with ONLY a JSON array (no explanation, no markdown fence), one
-element per input element:
-{"id": <id>, "plural_name": <string or null>, "nutrition": <object or null>}
+element per ingredient:
+{"id": <id>, "plural_name": <string or null>, "nutrition": <object or null>, "category_id": <integer or null>}
 """
 
 
@@ -269,6 +275,16 @@ def _fetch_all_foods_full(client):
     return foods
 
 
+def _fetch_supermarket_categories(client):
+    """Existing supermarket categories as [{"id", "name"}]. Empty list if the
+    endpoint isn't available - the category part is then simply skipped."""
+    try:
+        return tandoor_client.fetch_all_items(client, SUPERMARKET_CATEGORY_ENDPOINT)
+    except tandoor_client.TandoorError as exc:
+        log.warning("Could not load supermarket categories, skipping them: %s", exc)
+        return []
+
+
 def _same_word(a, b):
     return (a or "").strip().lower() == (b or "").strip().lower()
 
@@ -284,8 +300,10 @@ def _clean_nutrition(nutrition):
     return cleaned if len(cleaned) > 1 else None
 
 
-def _describe_enrich(name, plural, nutrition):
+def _describe_enrich(name, plural, nutrition, category):
     parts = []
+    if category:
+        parts.append(f"category {category['name']!r}")
     if plural:
         parts.append(f"plural {plural!r}")
     if nutrition:
@@ -315,13 +333,17 @@ def run_enrich_scan(job_id: str) -> None:
         with tandoor_client.get_client() as client:
             job.progress_label = "Loading ingredients..."
             tool_jobs.save_tool_job(job)
+            categories = _fetch_supermarket_categories(client)
+            categories_by_id = {c["id"]: c for c in categories}
             targets = []
             for food in _fetch_all_foods_full(client):
                 needs_plural = not (food.get("plural_name") or "").strip()
                 needs_nutrition = not food.get("properties")
-                if needs_plural or needs_nutrition:
-                    targets.append({"id": food["id"], "name": food["name"],
-                                    "needs_plural": needs_plural, "needs_nutrition": needs_nutrition})
+                # No existing categories -> nothing to pick from, so never ask.
+                needs_category = bool(categories) and not food.get("supermarket_category")
+                if needs_plural or needs_nutrition or needs_category:
+                    targets.append({"id": food["id"], "name": food["name"], "needs_plural": needs_plural,
+                                    "needs_nutrition": needs_nutrition, "needs_category": needs_category})
             job.progress_total = len(targets)
             job.cost_estimate = format_cost_estimate(len(targets), "chunked_enrich")
             tool_jobs.save_tool_job(job)
@@ -337,7 +359,10 @@ def run_enrich_scan(job_id: str) -> None:
                 tool_jobs.save_tool_job(job)
                 try:
                     text_out, usage = llm_provider.complete_text(
-                        system_prompt, json.dumps(chunk, ensure_ascii=False), max_tokens=8000
+                        system_prompt,
+                        json.dumps({"categories": categories if any(t["needs_category"] for t in chunk) else [],
+                                    "ingredients": chunk}, ensure_ascii=False),
+                        max_tokens=8000,
                     )
                     job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
                     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
@@ -358,12 +383,15 @@ def run_enrich_scan(job_id: str) -> None:
                     if _same_word(plural, target["name"]):
                         plural = ""  # plural == singular: nothing to add
                     nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
-                    if not plural and not nutrition:
+                    # Only accept ids of categories that actually exist.
+                    category = categories_by_id.get(answer.get("category_id")) if target["needs_category"] else None
+                    if not plural and not nutrition and not category:
                         continue
                     suggestions.append(ToolSuggestion(
                         id=uuid.uuid4().hex[:10], kind="enrich",
-                        summary=_describe_enrich(target["name"], plural, nutrition),
-                        detail={"food_id": target["id"], "plural_name": plural or None, "nutrition": nutrition},
+                        summary=_describe_enrich(target["name"], plural, nutrition, category),
+                        detail={"food_id": target["id"], "plural_name": plural or None, "nutrition": nutrition,
+                                "category": {"id": category["id"], "name": category["name"]} if category else None},
                     ))
                 job.progress_current = min(i * ENRICH_CHUNK_SIZE, len(targets))
                 tool_jobs.save_tool_job(job)
@@ -449,6 +477,16 @@ def apply_enrich_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                     unit_id, unit_name = tandoor_client._get_or_create(client, "unit", nutrition["basis"])
                     payload["properties_food_amount"] = 100
                     payload["properties_food_unit"] = {"id": unit_id, "name": unit_name}
+
+            category = detail.get("category")
+            if category and not food.get("supermarket_category"):
+                # Re-check it still exists: Tandoor's food serializer does a
+                # get-or-create BY NAME here, so a category deleted since the
+                # scan would silently be re-created.
+                resp = client.get(f"/{SUPERMARKET_CATEGORY_ENDPOINT}/{category['id']}/")
+                if resp.status_code != 200:
+                    raise tandoor_client.TandoorError(f"Supermarket category {category['name']!r} no longer exists - rescan.")
+                payload["supermarket_category"] = {"id": category["id"], "name": resp.json()["name"]}
 
             if len(payload) > 1:
                 resp = client.patch(f"/food/{detail['food_id']}/", json=payload)
