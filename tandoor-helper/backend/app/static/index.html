@@ -36,15 +36,9 @@
           </div>
           <div class="tool-card">
             <div class="tool-card-icon">🏷️</div>
-            <h3 data-i18n="toolTagsSimplifyTitle">Tags: simplify</h3>
-            <p data-i18n="toolTagsSimplifyDesc">AI-merges tags that mean the same thing.</p>
-            <button class="btn tool-start-btn" data-tool="tags_simplify" data-endpoint="/api/tools/tags/simplify" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🏷️</div>
-            <h3 data-i18n="toolTagsTranslateTitle">Tags: translate</h3>
-            <p data-i18n="toolTagsTranslateDesc">Translates tags not already in your output language.</p>
-            <button class="btn tool-start-btn" data-tool="tags_translate" data-endpoint="/api/tools/tags/translate" data-i18n="toolStartBtn">Start</button>
+            <h3 data-i18n="toolTagsCleanupTitle">Tags: translate &amp; simplify</h3>
+            <p data-i18n="toolTagsCleanupDesc">Translates tags and merges ones that mean the same thing - in one pass.</p>
+            <button class="btn tool-start-btn" data-tool="tags_cleanup" data-endpoint="/api/tools/tags/cleanup" data-i18n="toolStartBtn">Start</button>
           </div>
           <div class="tool-card">
             <div class="tool-card-icon">🍂</div>
@@ -63,6 +57,12 @@
             <h3 data-i18n="toolUnitsTitle">Units: review &amp; clean up</h3>
             <p data-i18n="toolUnitsDesc">Unifies spellings, translates, and fills in missing plurals.</p>
             <button class="btn tool-start-btn" data-tool="units_review" data-endpoint="/api/tools/units/review" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">🌐</div>
+            <h3 data-i18n="toolRecipesTranslateTitle">Recipes: translate</h3>
+            <p data-i18n="toolRecipesTranslateDesc">Translates existing recipes (title, description, steps, ingredient notes) into your output language.</p>
+            <button class="btn tool-start-btn" data-tool="recipes_translate" data-endpoint="/api/tools/recipes/translate" data-i18n="toolStartBtn">Start</button>
           </div>
         </div>
       </div>

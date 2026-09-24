@@ -7,7 +7,7 @@ import uuid
 from . import llm_provider, tandoor_client, tool_jobs
 from .config import settings
 from .schemas import ToolSuggestion
-from .tandoor_helpers import chunked, fetch_all_recipes_full, find_recipes_using_unit, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
+from .tandoor_helpers import chunked, delete_entity, entity_exists, fetch_all_recipes_full, find_recipes_using_unit, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
 
 log = logging.getLogger("tandoor-helper")
 
@@ -34,6 +34,10 @@ Find three kinds of problems:
 Prefer keeping the entry that is already the clean, conventional
 abbreviated/short form used in {language} recipes; if none of a group is
 already in {language}, invent the keep_name yourself.
+
+Every id may appear in AT MOST ONE element of your answer - put all ids
+of one unit into a single merge instead of listing a rename and a merge
+for the same entry.
 
 Only include entries that actually need a change. Respond with ONLY a JSON
 array (no explanation, no markdown fence), each element one of:
@@ -147,6 +151,32 @@ def _apply_rename(client, unit_id, new_name):
         raise tandoor_client.TandoorError(f"Could not rename unit #{unit_id}: {resp.status_code} {resp.text[:300]}")
 
 
+def _apply_set_plural(client, unit_id, plural_name):
+    """Tandoor's UnitSerializer.update() reads validated_data['name']
+    unconditionally, so a PATCH carrying only plural_name crashes it with a
+    500 - always send the unit's current name along. Also checks live for
+    another unit already NAMED like the plural, which would otherwise
+    surface as the same opaque 500 from the uniqueness constraint."""
+    resp = client.get(f"/unit/{unit_id}/")
+    if resp.status_code == 404:
+        raise tandoor_client.TandoorError(f"Unit #{unit_id} no longer exists (merged away by another suggestion?).")
+    resp.raise_for_status()
+    current_name = resp.json()["name"]
+
+    wanted = plural_name.strip().lower()
+    for other in tandoor_client.fetch_all_items(client, "unit"):
+        if other["id"] == unit_id:
+            continue
+        if (other.get("name") or "").strip().lower() == wanted:
+            raise tandoor_client.TandoorError(
+                f"Another unit (#{other['id']} {other['name']!r}) already uses {plural_name!r} - merge them instead (rescan)."
+            )
+
+    resp = client.patch(f"/unit/{unit_id}/", json={"name": current_name, "plural_name": plural_name})
+    if resp.status_code not in (200, 201):
+        raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+
+
 def _repoint_recipe_unit(recipe_detail, remove_id, keep_id, keep_name):
     new_steps = []
     for step in recipe_detail.get("steps", []):
@@ -184,18 +214,22 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                 _apply_rename(client, action["id"], action["new_name"])
 
             elif action["type"] == "set_plural":
-                resp = client.patch(f"/unit/{action['id']}/", json={"plural_name": action["plural_name"]})
-                if resp.status_code not in (200, 201):
-                    raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+                _apply_set_plural(client, action["id"], action["plural_name"])
 
             else:  # merge
                 keep_id, keep_name = action["keep_id"], action["keep_name"]
+                if not entity_exists(client, "unit", keep_id):
+                    raise tandoor_client.TandoorError(
+                        f"Unit #{keep_id} no longer exists (already merged by another suggestion?) - rescan to continue."
+                    )
                 _apply_rename(client, keep_id, keep_name)
 
                 # No confirmed /recipe/?units=<id> filter, so scan once for this apply.
                 all_recipes = fetch_all_recipes_full(client)
 
                 for remove_id in action["remove_ids"]:
+                    if not entity_exists(client, "unit", remove_id):
+                        continue  # already merged away by an earlier suggestion
                     affected = find_recipes_using_unit(all_recipes, remove_id)
                     for recipe in affected:
                         resp = client.get(f"/recipe/{recipe['id']}/")
@@ -226,11 +260,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                             f"Still used by {len(still_used)} recipe(s) after repointing - not deleting #{remove_id}."
                         )
 
-                    resp = client.delete(f"/unit/{remove_id}/")
-                    if resp.status_code not in (200, 202, 204):
-                        raise tandoor_client.TandoorError(
-                            f"Could not delete unit #{remove_id}: {resp.status_code} {resp.text[:200]}"
-                        )
+                    delete_entity(client, "unit", remove_id)
 
         suggestion.status = "applied"
     except Exception as exc:  # noqa: BLE001

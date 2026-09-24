@@ -122,7 +122,11 @@ def fetch_units_with_plural(client: httpx.Client, units: list[dict]) -> list[dic
 
 
 def apply_set_plural(client: httpx.Client, unit_id: int, plural_name: str) -> None:
-    resp = client.patch(f"/unit/{unit_id}/", json={"plural_name": plural_name})
+    # Tandoor's UnitSerializer.update() needs "name" in the payload, otherwise
+    # a plural-only PATCH fails with a 500 - send the current name along.
+    resp = client.get(f"/unit/{unit_id}/")
+    resp.raise_for_status()
+    resp = client.patch(f"/unit/{unit_id}/", json={"name": resp.json()["name"], "plural_name": plural_name})
     if resp.status_code not in (200, 201):
         raise TandoorError(f"Could not set plural for unit #{unit_id}: {resp.status_code} {resp.text[:300]}")
 

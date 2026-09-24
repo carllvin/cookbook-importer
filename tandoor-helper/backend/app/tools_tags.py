@@ -7,7 +7,7 @@ import uuid
 from . import llm_provider, tandoor_client, tool_jobs
 from .config import settings, get_language_code
 from .schemas import ToolSuggestion
-from .tandoor_helpers import chunked, fetch_all_recipes_full, find_recipes_by_filter, format_cost_estimate, resolve_name_collisions, validate_actions
+from .tandoor_helpers import chunked, delete_entity, entity_exists, fetch_all_recipes_full, find_recipes_by_filter, format_cost_estimate, resolve_name_collisions, validate_actions
 
 log = logging.getLogger("tandoor-helper")
 
@@ -23,8 +23,14 @@ def _apply_rename(client, keyword_id, new_name):
 
 
 def _apply_merge(client, keep_id, keep_name, remove_ids):
+    if not entity_exists(client, "keyword", keep_id):
+        raise tandoor_client.TandoorError(
+            f"Keyword #{keep_id} no longer exists (already merged by another suggestion?) - rescan to continue."
+        )
     _apply_rename(client, keep_id, keep_name)
     for remove_id in remove_ids:
+        if not entity_exists(client, "keyword", remove_id):
+            continue  # already merged away by an earlier suggestion
         for recipe in _find_recipes_using_keyword(client, remove_id):
             current_ids = {kw["id"] for kw in recipe.get("keywords", [])}
             current_ids.discard(remove_id)
@@ -37,9 +43,7 @@ def _apply_merge(client, keep_id, keep_name, remove_ids):
         if still_used:
             raise tandoor_client.TandoorError(f"Still used by {len(still_used)} recipe(s) after repointing - not deleting #{remove_id}.")
 
-        resp = client.delete(f"/keyword/{remove_id}/")
-        if resp.status_code not in (200, 202, 204):
-            raise tandoor_client.TandoorError(f"Could not delete keyword #{remove_id}: {resp.status_code} {resp.text[:200]}")
+        delete_entity(client, "keyword", remove_id)
 
 
 def _describe_action(action, by_id):
@@ -152,6 +156,43 @@ fence), each element one of:
 
 If nothing needs a change, respond with [].
 """
+
+
+CLEANUP_SYSTEM_PROMPT = """You clean up recipe tags in a database whose
+target language is {language}. You will receive a JSON array of existing
+tags, each {{"id": integer, "name": string}}.
+
+Do BOTH of these in one pass:
+1. Translate: any tag whose name is NOT already in {language} gets a natural
+   {language} name (a single word or short phrase in the style of a recipe
+   tag, not a literal word-for-word translation).
+2. Simplify: tags that clearly mean the same thing to a home cook - after
+   translation, and even when worded differently (e.g. "cakes", "cake" and
+   "Kuchen"; "Schnelles Gericht" and "schnell"; "Nachtisch" and "Dessert")
+   - get merged into ONE tag. Be conservative: only merge genuinely identical
+   concepts, not merely related ones ("Vegan" and "Vegetarisch" are NOT the
+   same; "Sommer" and "Grillen" are NOT the same). Prefer keeping the entry
+   that is already a clean {language} name; among those, the shorter, more
+   common-sounding one.
+
+Every tag id may appear in AT MOST ONE element of your answer - put all ids
+of one concept into a single merge instead of listing a rename and a merge
+for the same tag. Only include tags that actually need a change. Respond
+with ONLY a JSON array (no explanation, no markdown fence), each element one
+of:
+
+{{"type": "rename", "id": <id>, "new_name": <translated name>}}
+{{"type": "merge", "keep_id": <id to keep>, "keep_name": <name for it, translated if needed>, "remove_ids": [<other ids that mean the same tag>]}}
+
+If nothing needs a change, respond with [].
+"""
+
+
+def run_cleanup_scan(job_id: str) -> None:
+    """Translate + simplify in one AI pass - running them as two separate
+    tools meant a tag could be renamed by one and merged by the other, and
+    each pass only saw half the picture ("cakes" -> "Kuchen" is both)."""
+    _run_tag_review_scan(job_id, CLEANUP_SYSTEM_PROMPT)
 
 
 def run_simplify_scan(job_id: str) -> None:
@@ -448,7 +489,7 @@ def apply_suggest_tags_suggestion(job_id: str, suggestion_id: str) -> ToolSugges
 
 def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     """Dispatches to the right apply function based on the suggestion's kind -
-    the single entry point main.py calls, regardless of which of the four tag
+    the single entry point main.py calls, regardless of which of the tag
     tools produced the suggestion."""
     job = tool_jobs.get_tool_job(job_id)
     if job is None:

@@ -7,7 +7,7 @@ import uuid
 from . import llm_provider, tandoor_client, tool_jobs
 from .config import settings
 from .schemas import ToolSuggestion
-from .tandoor_helpers import chunked, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
+from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
 
 log = logging.getLogger("tandoor-helper")
 
@@ -33,6 +33,10 @@ Find three kinds of problems:
    qualifies, prefer the shorter one. If none of the group is already clean
    {language}, invent the keep_name yourself (translated + cleaned) even
    though no existing entry currently has it.
+
+Every id may appear in AT MOST ONE element of your answer - put all ids
+of one ingredient into a single merge instead of listing a rename and a merge
+for the same entry.
 
 Only include entries that actually need a change - do not list names that
 are already a clean, plain, singular {language} noun. Respond with ONLY a
@@ -176,11 +180,17 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                     raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
             else:  # merge
                 keep_id, keep_name = action["keep_id"], action["keep_name"]
+                if not entity_exists(client, "food", keep_id):
+                    raise tandoor_client.TandoorError(
+                        f"Food #{keep_id} no longer exists (already merged by another suggestion?) - rescan to continue."
+                    )
                 resp = client.patch(f"/food/{keep_id}/", json={"name": keep_name})
                 if resp.status_code not in (200, 201):
                     raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
 
                 for remove_id in action["remove_ids"]:
+                    if not entity_exists(client, "food", remove_id):
+                        continue  # already merged away by an earlier suggestion
                     for recipe in _find_recipes_using_food(client, remove_id):
                         resp = client.get(f"/recipe/{recipe['id']}/")
                         resp.raise_for_status()
@@ -196,11 +206,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                         raise tandoor_client.TandoorError(
                             f"Still used by {len(still_used)} recipe(s) after repointing - not deleting #{remove_id}."
                         )
-                    resp = client.delete(f"/food/{remove_id}/")
-                    if resp.status_code not in (200, 202, 204):
-                        raise tandoor_client.TandoorError(
-                            f"Could not delete food #{remove_id}: {resp.status_code} {resp.text[:200]}"
-                        )
+                    delete_entity(client, "food", remove_id)
 
         suggestion.status = "applied"
     except Exception as exc:  # noqa: BLE001
