@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, import_matching, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import image_gen, import_matching, jobs, tandoor_client, tool_jobs, tools_conversions, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -479,6 +479,7 @@ _TOOL_SCANS = {
     "units_review": tools_units.run_scan,
     "recipes_translate": tools_recipes.run_scan,
     "new_recipes": tools_new_recipes.run_scan,
+    "conversions": tools_conversions.run_scan,
 }
 
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
@@ -493,6 +494,7 @@ _TOOL_APPLY = {
     "units_review": tools_units.apply_suggestion,
     "recipes_translate": tools_recipes.apply_suggestion,
     "new_recipes": tools_new_recipes.apply_suggestion,
+    "conversions": tools_conversions.apply_suggestion,
 }
 
 
@@ -545,6 +547,11 @@ async def start_units_review():
 @app.post("/api/tools/recipes/translate")
 async def start_recipes_translate():
     return _start_tool_job("recipes_translate")
+
+
+@app.post("/api/tools/conversions")
+async def start_conversions():
+    return _start_tool_job("conversions")
 
 
 @app.get("/api/tools/new-recipes/status")
