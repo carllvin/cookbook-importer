@@ -32,6 +32,8 @@
           <h3 data-i18n="toolNewRecipesTitle">Process new recipes</h3>
           <p data-i18n="toolNewRecipesDesc">For recipes added since the last run (via Tandoor or this app): translates them automatically, then suggests matching their ingredients, units and tags to existing ones, filling in ingredient details, and adding tags.</p>
           <p id="new-recipes-status" class="new-recipes-status"></p>
+          <p id="new-recipes-auto" class="new-recipes-auto hidden"></p>
+          <div id="new-recipes-open-jobs" class="new-recipes-open-jobs"></div>
           <button id="new-recipes-start-btn" class="btn tool-start-btn" data-tool="new_recipes" data-endpoint="/api/tools/new-recipes/process" data-i18n="toolStartBtn" disabled>Start</button>
         </div>
         <div class="tools-grid">

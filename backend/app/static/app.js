@@ -916,6 +916,30 @@ async function loadNewRecipesStatus() {
       label.textContent = data.new_count > 0 ? tf('toolNewRecipesCount', { count: data.new_count }) : t('toolNewRecipesNone');
     }
     btn.disabled = data.new_count === 0;
+
+    const auto = el('new-recipes-auto');
+    if (data.auto_interval_hours > 0) {
+      const next = data.next_auto_run_at
+        ? new Date(data.next_auto_run_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+        : '–';
+      auto.textContent = tf('toolNewRecipesAuto', { hours: data.auto_interval_hours, next });
+      auto.classList.remove('hidden');
+    } else {
+      auto.classList.add('hidden');
+    }
+
+    const list = el('new-recipes-open-jobs');
+    list.innerHTML = (data.open_jobs || []).map((job) => {
+      const when = new Date(job.created_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      const label = job.status === 'scanning'
+        ? tf('toolNewRecipesJobRunning', { when })
+        : tf(job.auto ? 'toolNewRecipesJobAuto' : 'toolNewRecipesJobManual', { when, count: job.pending });
+      return `<div class="new-recipes-open-job"><span>${escapeHtml(label)}</span>
+        <button class="btn secondary" type="button" data-job-id="${job.id}">${t('toolNewRecipesOpenJob')}</button></div>`;
+    }).join('');
+    list.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => openToolJob(b.dataset.jobId, t('toolNewRecipesTitle')));
+    });
   } catch (e) {
     label.textContent = `${t('toolNewRecipesStatusFailed')}: ${e.message}`;
   }
@@ -939,6 +963,26 @@ document.querySelectorAll('.tool-start-btn').forEach((btn) => {
 });
 
 async function startTool(endpoint, title) {
+  resetToolRunView(title);
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    toolsState.jobId = data.job_id;
+    pollToolJob();
+  } catch (e) {
+    showToolError(`${t('toolStartFailed')}: ${e.message}`);
+  }
+}
+
+// Opens a run that already exists (e.g. one the automatic schedule started).
+function openToolJob(jobId, title) {
+  resetToolRunView(title);
+  toolsState.jobId = jobId;
+  pollToolJob();
+}
+
+function resetToolRunView(title) {
   el('tools-cards-view').classList.add('hidden');
   el('tools-run-view').classList.remove('hidden');
   el('tools-run-title').textContent = title;
@@ -954,16 +998,6 @@ async function startTool(endpoint, title) {
   el('tools-bulk-status').textContent = '';
   toolsState.job = null;
   toolsState.selected.clear();
-
-  try {
-    const res = await fetch(endpoint, { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    toolsState.jobId = data.job_id;
-    pollToolJob();
-  } catch (e) {
-    showToolError(`${t('toolStartFailed')}: ${e.message}`);
-  }
 }
 
 el('tools-cancel-btn').addEventListener('click', async () => {

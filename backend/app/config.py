@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # Housekeeping
     job_retention_hours: int = 48      # delete jobs (and their uploaded PDF/images) older than this many hours
+    auto_process_interval_hours: float = 0  # run "Process new recipes" automatically every N hours; 0 = off
 
     # OCR (for scanned PDF pages with no text layer, and for directly uploaded photos)
     ocr_languages: str = "eng"         # Tesseract language code(s), '+'-joined, e.g. "eng+deu". Installed by default: eng, deu, fra, ita, spa

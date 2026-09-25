@@ -650,6 +650,8 @@ async def on_startup() -> None:
     # then keep running in the background for as long as the app is up.
     jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
     asyncio.create_task(_cleanup_loop())
+    if settings.auto_process_interval_hours > 0:
+        asyncio.create_task(tools_new_recipes.auto_run_loop())
 
 
 # Mount the static frontend last, so /api/* routes take precedence

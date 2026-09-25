@@ -17,6 +17,7 @@ recorded as handled once every suggestion is applied or skipped - so if the
 container restarts before that, they simply show up again next time."""
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import logging
@@ -80,26 +81,94 @@ def list_recipe_ids(client) -> list[int]:
     return ids
 
 
+def open_jobs(exclude_id: str | None = None) -> list:
+    """New-recipes runs that are still scanning, or finished but with
+    suggestions not yet applied/skipped - their recipes aren't recorded as
+    handled yet, but must not be picked up by a second run either (that
+    would produce the same suggestions twice)."""
+    return [
+        job for job in tool_jobs.list_tool_jobs("new_recipes")
+        if job.id != exclude_id and not job.meta.get("marked")
+        and (job.status == "scanning" or (job.status == "ready" and any(s.status == "pending" for s in job.suggestions)))
+    ]
+
+
+def _in_open_jobs(exclude_id: str | None = None) -> set[int]:
+    return {rid for job in open_jobs(exclude_id) for rid in job.meta.get("recipe_ids", [])}
+
+
 def status() -> dict:
-    """How many recipes are new. Creates the baseline on first use: every
-    recipe existing right now counts as already handled."""
+    """How many recipes are new (not handled and not already part of an
+    open run), plus the open runs and the automatic-run schedule. Creates the
+    baseline on first use: every recipe existing right now counts as handled."""
     with tandoor_client.get_client() as client:
         ids = list_recipe_ids(client)
+    result = {
+        "auto_interval_hours": settings.auto_process_interval_hours,
+        "next_auto_run_at": _next_auto_run_at,
+        "open_jobs": [
+            {"id": job.id, "created_at": job.created_at, "status": job.status, "auto": bool(job.meta.get("auto")),
+             "pending": sum(1 for s in job.suggestions if s.status == "pending")}
+            for job in sorted(open_jobs(), key=lambda j: j.created_at)
+        ],
+    }
     with _store_lock:
         store = _load_store()
         if store is None:
             _save_store({"baseline_at": time.time(), "recipe_ids": sorted(ids)})
-            return {"new_count": 0, "baseline_created": True, "baseline_count": len(ids)}
-    new_ids = set(ids) - set(store["recipe_ids"])
-    return {"new_count": len(new_ids), "baseline_created": False}
+            return {**result, "new_count": 0, "baseline_created": True, "baseline_count": len(ids)}
+    new_ids = set(ids) - set(store["recipe_ids"]) - _in_open_jobs()
+    return {**result, "new_count": len(new_ids), "baseline_created": False}
 
 
-def _new_recipe_ids(client) -> list[int]:
+def _new_recipe_ids(client, job_id: str | None = None) -> list[int]:
     store = _load_store()
     if store is None:
         raise tandoor_client.TandoorError("No baseline yet - open the tools page once first.")
-    done = set(store["recipe_ids"])
-    return [rid for rid in list_recipe_ids(client) if rid not in done]
+    skip = set(store["recipe_ids"]) | _in_open_jobs(exclude_id=job_id)
+    return [rid for rid in list_recipe_ids(client) if rid not in skip]
+
+
+# ---------- Automatic runs ----------
+
+_next_auto_run_at: float | None = None
+
+
+def auto_run_once() -> str | None:
+    """Starts a new-recipes run if there's anything new (blocking - call from
+    a worker thread). Returns the job id, or None if nothing was started.
+    Never creates the baseline itself: until someone has opened the tools
+    page once, there's no "since" to compare against."""
+    if not llm_provider.is_configured() or _load_store() is None:
+        return None
+    if any(job.status == "scanning" for job in open_jobs()):
+        return None  # one run at a time
+    with tandoor_client.get_client() as client:
+        if not _new_recipe_ids(client):
+            return None
+    job = tool_jobs.create_tool_job("new_recipes")
+    job.meta["auto"] = True
+    tool_jobs.save_tool_job(job)
+    log.info("Automatic new-recipes run started (job %s)", job.id)
+    run_scan(job.id)
+    return job.id
+
+
+async def auto_run_loop() -> None:
+    """Background loop (started by main.py when AUTO_PROCESS_INTERVAL_HOURS > 0):
+    every N hours, process recipes added since the last run. Translations are
+    applied right away; everything else waits in the tools page for review."""
+    global _next_auto_run_at
+    interval = settings.auto_process_interval_hours * 3600
+    _next_auto_run_at = time.time() + 60
+    await asyncio.sleep(60)  # let the app finish starting up first
+    while True:
+        try:
+            await asyncio.to_thread(auto_run_once)
+        except Exception:  # noqa: BLE001
+            log.exception("Automatic new-recipes run failed")
+        _next_auto_run_at = time.time() + interval
+        await asyncio.sleep(interval)
 
 
 # ---------- Matching new units/ingredients/tags against existing ones ----------
@@ -277,7 +346,7 @@ def run_scan(job_id: str) -> None:
         with tandoor_client.get_client() as client:
             job.progress_label = "Looking for new recipes..."
             tool_jobs.save_tool_job(job)
-            new_ids = _new_recipe_ids(client)
+            new_ids = _new_recipe_ids(client, job_id)
             job.meta["recipe_ids"] = new_ids
             job.progress_total = len(new_ids)
             recipes = []

@@ -52,3 +52,8 @@ def check_cancelled(job: ToolJob) -> bool:
         save_tool_job(job)
         return True
     return False
+
+
+def list_tool_jobs(tool: str) -> list[ToolJob]:
+    with _lock:
+        return [job for job in _tool_jobs.values() if job.tool == tool]
