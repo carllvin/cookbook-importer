@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import image_gen, import_matching, jobs, tandoor_client, tool_jobs, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -157,6 +157,10 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
         jobs.save_job(job)
         _mark_duplicates(job)
 
+        job.progress_label = "Matching ingredients with Tandoor …"
+        jobs.save_job(job)
+        import_matching.match_job_ingredients(job)
+
         job.status = "ready"
     except Exception as exc:  # noqa: BLE001
         log.exception("Extraction failed for job %s", job_id)
@@ -249,7 +253,9 @@ async def update_recipe(job_id: str, recipe_id: str, payload: dict = Body(...)):
         raise HTTPException(404, "Job not found.")
     for i, r in enumerate(job.recipes):
         if r.id == recipe_id:
-            updated = r.model_copy(update=payload)
+            # Validate, not model_copy(update=...): that would store edited
+            # ingredients/steps as plain dicts, which the import can't read.
+            updated = ExtractedRecipe.model_validate({**r.model_dump(), **payload})
             job.recipes[i] = updated
             jobs.save_job(job)
             return updated.model_dump()

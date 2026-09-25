@@ -12,6 +12,8 @@ class Ingredient(BaseModel):
     note: Optional[str] = None
     group: Optional[str] = None  # e.g. "For the dough", "For the filling"
     step_index: Optional[int] = None  # 0-based index of the step that needs this ingredient
+    tandoor_match: Optional[str] = None  # "exists" | "matched" | "new" - set by import_matching before review
+    original_name: Optional[str] = None  # name before it was matched to an existing Tandoor ingredient
 
 
 class Step(BaseModel):

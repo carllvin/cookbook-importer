@@ -774,3 +774,12 @@ a { color: inherit; }
 .tools-bulk-actions button { padding: 6px 14px; font-size: 0.8rem; }
 .tool-suggestion-row.pending { cursor: pointer; }
 .tool-suggestion-row .suggestion-check { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
+
+.ing-name-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ing-name-wrap .ing-name { flex: 1; min-width: 0; }
+.ing-match { flex-shrink: 0; font-size: 0.72rem; line-height: 1; padding: 3px 6px; border-radius: 999px; border: 1px solid; }
+.ing-match.exists { color: #8fb996; border-color: #3f5a44; }
+.ing-match.matched { color: var(--gold); border-color: var(--gold-dim); cursor: pointer; }
+.ing-match.matched:hover { background: rgba(185,133,47,0.15); }
+.ing-match.new { color: #8f9689; border-color: #4a5147; }
+.ing-match-summary { font-size: 0.8rem; color: #8f9689; margin: -4px 0 10px; }
