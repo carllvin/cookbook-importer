@@ -11,6 +11,7 @@ import uuid
 
 from . import nutrition_properties as np_, tandoor_client, tool_jobs, tools_ingredients
 from .schemas import ToolSuggestion
+from .tandoor_helpers import fetch_all_recipes_full
 
 log = logging.getLogger("tandoor-helper")
 
@@ -27,6 +28,32 @@ def _foods_with_properties(client) -> list[dict]:
         if resp.status_code == 200:
             detailed.append(resp.json())
     return detailed
+
+
+PROPERTY_ENDPOINT_CANDIDATES = ["property", "food-property"]
+
+
+def _fetch_all_properties(client) -> tuple[str | None, list[dict]]:
+    """(endpoint, every property VALUE object) - e.g. "300 kcal Energy".
+    Tandoor keeps these as separate rows: removing one from an ingredient
+    only detaches it, and as long as any exist, the property type can't be
+    deleted ("blocking" objects in Tandoor's delete dialog)."""
+    for endpoint in PROPERTY_ENDPOINT_CANDIDATES:
+        url, params, items = f"/{endpoint}/", {"page_size": 200}, []
+        resp = client.get(url, params=params)
+        if resp.status_code == 404:
+            continue
+        resp.raise_for_status()
+        for _ in range(500):
+            data = resp.json()
+            items.extend(data.get("results", data) if isinstance(data, dict) else data)
+            url = data.get("next") if isinstance(data, dict) else None
+            if not url:
+                break
+            resp = client.get(url)
+            resp.raise_for_status()
+        return endpoint, items
+    return None, []
 
 
 def _type_id(prop):
@@ -47,6 +74,10 @@ def run_scan(job_id: str) -> None:
             for food in foods:
                 for prop in food.get("properties") or []:
                     usage[_type_id(prop)] = usage.get(_type_id(prop), 0) + 1
+            _prop_endpoint, all_values = _fetch_all_properties(client)
+            value_count = {}
+            for value in all_values:
+                value_count[_type_id(value)] = value_count.get(_type_id(value), 0) + 1
 
             groups: dict[str, list[dict]] = {}
             for pt in types:
@@ -74,7 +105,8 @@ def run_scan(job_id: str) -> None:
                         id=uuid.uuid4().hex[:10], kind="merge_property",
                         summary=(f"property: merge {dup['name']!r} ({dup.get('unit') or '-'}) into "
                                  f"{keep['name']!r} ({keep.get('unit') or '-'}) - used by {usage.get(dup['id'], 0)} "
-                                 f"ingredient(s), then delete {dup['name']!r}"),
+                                 f"ingredient(s); then remove its {value_count.get(dup['id'], 0)} stored value(s) "
+                                 f"and delete {dup['name']!r}"),
                         detail={"type": "merge", "key": key,
                                 "keep": {"id": keep["id"], "name": keep["name"], "unit": keep.get("unit")},
                                 "remove": {"id": dup["id"], "name": dup["name"], "unit": dup.get("unit")}},
@@ -113,6 +145,38 @@ def _merge_food_properties(food, detail):
     if target is None and moved is not None:
         new_props.append({"property_type": {"id": keep["id"], "name": keep["name"]}, "property_amount": moved})
     return new_props
+
+
+def _delete_leftover_values(client, detail) -> None:
+    """Deletes the duplicate type's detached value rows so the type itself
+    can be deleted. Values still attached to a RECIPE (set by hand on the
+    recipe, not on an ingredient) are never deleted - the merge stops
+    instead, naming them."""
+    remove_id = detail["remove"]["id"]
+    endpoint, values = _fetch_all_properties(client)
+    values = [v for v in values if _type_id(v) == remove_id]
+    if not values:
+        return
+    if endpoint is None:
+        raise tandoor_client.TandoorError("No property endpoint found - can't remove the leftover values.")
+
+    value_ids = {v["id"] for v in values}
+    in_use = {p.get("id") for f in _foods_with_properties(client) for p in f.get("properties") or []} & value_ids
+    if in_use:
+        raise tandoor_client.TandoorError(f"{len(in_use)} value(s) still attached to ingredients - not deleting.")
+    used_by_recipes = [r["name"] for r in fetch_all_recipes_full(client)
+                       if any(p.get("id") in value_ids for p in r.get("properties") or [])]
+    if used_by_recipes:
+        raise tandoor_client.TandoorError(
+            f"{detail['remove']['name']!r} values are set directly on recipe(s) {used_by_recipes[:5]} - "
+            f"move those by hand in Tandoor, then run this again."
+        )
+    for value_id in value_ids:
+        resp = client.delete(f"/{endpoint}/{value_id}/")
+        if resp.status_code not in (200, 202, 204, 404):
+            raise tandoor_client.TandoorError(
+                f"Could not delete leftover value #{value_id}: {resp.status_code} {resp.text[:200]}"
+            )
 
 
 def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
@@ -155,6 +219,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
                             f"{fresh['name']!r} still has {detail['remove']['name']!r} after the update - "
                             f"not deleting the property type."
                         )
+                _delete_leftover_values(client, detail)
                 resp = client.delete(f"/{endpoint}/{remove_id}/")
                 if resp.status_code not in (200, 202, 204, 404):
                     raise tandoor_client.TandoorError(
