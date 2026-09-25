@@ -20,7 +20,8 @@ Everything ingredient-related in one script, as three subcommands:
 
   nutrition   Estimates rough nutritional values (energy, protein, fat,
               carbs per 100g) for foods with none set yet, via Tandoor's
-              Property feature.
+              Property feature - only property types that already exist
+              (e.g. Kalorien, Proteine, Fett, Kohlenhydrate), never new ones.
               💰 Uses AI tokens (one call per food checked).
 
 Every subcommand defaults to a dry run / report and takes --preview N to
@@ -56,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx  # noqa: E402
 
-from app import llm_provider, tandoor_client  # noqa: E402
+from app import llm_provider, nutrition_properties, tandoor_client  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.tandoor_client import TandoorError  # noqa: E402
 from scripts._shared import (  # noqa: E402
@@ -72,7 +73,6 @@ from scripts._shared import (  # noqa: E402
 
 CHUNK_SIZE = 80
 CATEGORY_ENDPOINT_CANDIDATES = ["supermarket-category", "supermarketcategory", "food-category"]
-PROPERTY_TYPE_ENDPOINT_CANDIDATES = ["property-type", "propertytype", "property_type"]
 
 REVIEW_SYSTEM_PROMPT = """You are cleaning up a home cook's ingredient
 database. Its target language is {language}. You will receive a JSON array
@@ -409,13 +409,6 @@ def run_metadata(preview_count, apply, assume_yes):
                   f"created, {errors} error(s).")
 
 
-NUTRIENTS = {
-    "Energy": ("kcal", "energy in kcal"),
-    "Protein": ("g", "protein in grams"),
-    "Fat": ("g", "fat in grams"),
-    "Carbohydrates": ("g", "carbohydrates in grams"),
-}
-
 NUTRITION_SYSTEM_PROMPT = """You estimate rough, typical nutritional values
 for raw or commonly-used food ingredients, per 100g (or per 100ml for
 liquids). Respond with ONLY a JSON object: {"energy_kcal": number,
@@ -427,34 +420,6 @@ for it as eaten.
 """
 
 
-def find_property_type_endpoint(client):
-    for endpoint in PROPERTY_TYPE_ENDPOINT_CANDIDATES:
-        try:
-            resp = client.get(f"/{endpoint}/", params={"page_size": 1})
-        except httpx.HTTPError:
-            continue
-        if resp.status_code == 200:
-            return endpoint
-    raise TandoorError(
-        f"Could not find a working property-type endpoint (tried {PROPERTY_TYPE_ENDPOINT_CANDIDATES}). "
-        f"Check your Tandoor version's API schema at <TANDOOR_URL>/api/schema/swagger-ui/ for the correct name."
-    )
-
-
-def get_or_create_property_type(client, endpoint, name, unit):
-    resp = client.get(f"/{endpoint}/", params={"query": name, "page_size": 10})
-    resp.raise_for_status()
-    data = resp.json()
-    results = data.get("results", data) if isinstance(data, dict) else data
-    for item in results:
-        if item.get("name", "").strip().lower() == name.lower():
-            return item["id"]
-    resp = client.post(f"/{endpoint}/", json={"name": name, "unit": unit})
-    if resp.status_code not in (200, 201):
-        raise TandoorError(f"Could not create property type {name!r}: {resp.status_code} {resp.text[:300]}")
-    return resp.json()["id"]
-
-
 def estimate_nutrition(food_name, tracker):
     text_out, usage = llm_provider.complete_tool_text(NUTRITION_SYSTEM_PROMPT, f"Food: {food_name}", max_tokens=200)
     tracker.add(usage)
@@ -464,17 +429,14 @@ def estimate_nutrition(food_name, tracker):
     return json.loads(text_out)
 
 
-def build_properties_payload(estimate_result, property_type_ids):
-    mapping = {
-        "Energy": estimate_result.get("energy_kcal"),
-        "Protein": estimate_result.get("protein_g"),
-        "Fat": estimate_result.get("fat_g"),
-        "Carbohydrates": estimate_result.get("carbs_g"),
-    }
+def build_properties_payload(estimate_result, property_types):
+    """property_types: nutrient key -> EXISTING Tandoor property type (from
+    nutrition_properties.existing_nutrient_types) - never creates new ones."""
     return [
-        {"property_type": {"id": property_type_ids[name]}, "property_amount": value}
-        for name, value in mapping.items()
-        if value is not None
+        {"property_type": {"id": pt["id"], "name": pt["name"]},
+         "property_amount": nutrition_properties.convert(estimate_result[key], key, pt.get("unit"))}
+        for key, pt in property_types.items()
+        if estimate_result.get(key) is not None
     ]
 
 
@@ -504,11 +466,12 @@ def run_nutrition(preview_count, apply):
                 print(f"  ... and {len(without_properties) - 20} more")
             return
 
-        endpoint = find_property_type_endpoint(client)
-        property_type_ids = {
-            name: get_or_create_property_type(client, endpoint, name, unit)
-            for name, (unit, _label) in NUTRIENTS.items()
-        }
+        property_types = nutrition_properties.existing_nutrient_types(client)
+        if not property_types:
+            print("No matching nutrition property types exist in Tandoor (e.g. Kalorien, Proteine, Fett, "
+                  "Kohlenhydrate). Create them there first - this script never creates new ones.")
+            return
+        print("Using property types: " + ", ".join(f"{k} -> {pt['name']!r}" for k, pt in property_types.items()))
 
         targets = without_properties[:preview_count] if preview_count else without_properties
         print(format_cost_estimate(len(targets), "per_recipe_small"))
@@ -532,7 +495,7 @@ def run_nutrition(preview_count, apply):
             if not write_mode:
                 continue
 
-            payload = {"properties": build_properties_payload(result, property_type_ids)}
+            payload = {"properties": build_properties_payload(result, property_types)}
             resp = client.patch(f"/food/{food['id']}/", json=payload)
 
             if not checked_first_write:
