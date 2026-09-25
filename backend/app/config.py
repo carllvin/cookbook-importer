@@ -8,14 +8,19 @@ class Settings(BaseSettings):
     # Anthropic / Claude
     anthropic_api_key: str = ""
     claude_model: str = "claude-sonnet-4-6"
+    # Cheaper model for the maintenance tools (matching, tagging, plurals...);
+    # empty = use claude_model for those too
+    claude_tools_model: str = "claude-haiku-4-5-20251001"
 
     # OpenAI / ChatGPT
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
+    openai_tools_model: str = ""       # cheaper model for the maintenance tools; empty = openai_model
 
     # Google / Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    gemini_tools_model: str = ""       # cheaper model for the maintenance tools; empty = gemini_model
 
     # Tandoor
     tandoor_url: str = ""      # e.g. https://recipes.myserver.com (no trailing slash)

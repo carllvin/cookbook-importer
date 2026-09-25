@@ -81,7 +81,7 @@ def _run_tag_review_scan(job_id, system_prompt_template):
                 tool_jobs.save_tool_job(job)
                 try:
                     system_prompt = system_prompt_template.replace("{language}", settings.output_language)
-                    text_out, usage = llm_provider.complete_text(
+                    text_out, usage = llm_provider.complete_tool_text(
                         system_prompt,
                         json.dumps([{"id": t["id"], "name": t["name"]} for t in chunk], ensure_ascii=False),
                         max_tokens=8000,
@@ -322,7 +322,7 @@ def season_suggestions(job, recipes) -> list[ToolSuggestion]:
 def _complete_json(job, system_prompt, payload, max_tokens):
     """One AI call with a JSON payload; adds token usage to the job and
     returns the parsed JSON answer."""
-    text_out, usage = llm_provider.complete_text(system_prompt, json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
+    text_out, usage = llm_provider.complete_tool_text(system_prompt, json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
     job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
     text_out = text_out.strip().strip("`")

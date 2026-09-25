@@ -51,7 +51,7 @@ If nothing needs a change, respond with [].
 
 def _review_chunk(foods, language):
     system_prompt = REVIEW_SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
+    text_out, usage = llm_provider.complete_tool_text(
         system_prompt,
         json.dumps([{"id": f["id"], "name": f["name"]} for f in foods], ensure_ascii=False),
         max_tokens=8000,
@@ -346,7 +346,7 @@ def enrich_suggestions(job, targets, categories) -> list[ToolSuggestion]:
         job.progress_label = f"Checking ingredient details {i}/{len(chunks)}..."
         tool_jobs.save_tool_job(job)
         try:
-            text_out, usage = llm_provider.complete_text(
+            text_out, usage = llm_provider.complete_tool_text(
                 system_prompt,
                 json.dumps({"categories": categories if any(t["needs_category"] for t in chunk) else [],
                             "ingredients": chunk}, ensure_ascii=False),

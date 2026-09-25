@@ -92,7 +92,7 @@ If nothing needs a change, respond with [].
 
 def review_chunk(units: list[dict], language: str, tracker: TokenTracker) -> list[dict]:
     system_prompt = REVIEW_SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
+    text_out, usage = llm_provider.complete_tool_text(
         system_prompt,
         json.dumps(
             [{"id": u["id"], "name": u["name"], "plural_name": u.get("plural_name")} for u in units],

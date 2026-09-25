@@ -17,6 +17,7 @@ recorded as handled once every suggestion is applied or skipped - so if the
 container restarts before that, they simply show up again next time."""
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -103,67 +104,146 @@ def _new_recipe_ids(client) -> list[int]:
 
 # ---------- Matching new units/ingredients/tags against existing ones ----------
 
-MATCH_SYSTEM_PROMPT = """You keep a home cook's {entity} list clean. The target
-language is {language}. You will receive a JSON object {"existing": [names
-of ALL current entries], "new": [{"id": integer, "name": string}, ...]}.
-The "new" entries were just introduced by newly added recipes.
+NORMALIZE_SYSTEM_PROMPT = """You clean up {entity} names in a home cook's
+database. The target language is {language}. You will receive a JSON array
+of {"id": integer, "name": string}.
 
-For each "new" entry decide:
-- It means the same as a DIFFERENT entry in "existing" (other language,
-  singular/plural, spelling variant, {variants}) -> merge it into that one:
-  {"id": <id>, "match_name": <that existing name, exactly as listed>}
-- Otherwise, if its name isn't a clean {language} {entity_singular} name
-  ({style}) -> {"id": <id>, "new_name": <clean {language} name>}
-- Otherwise leave it out.
+For each entry answer the standard {language} name a {language} cookbook
+would use ({style}) - translate it if it's in another language, e.g.
+{variants}. Also list up to 3 other common {language} names for exactly the
+same thing (regional names, synonyms), if there are any.
 
-Be conservative with merges: only when it's genuinely the same thing, not
-merely related. Respond with ONLY a JSON array (no explanation, no markdown
-fence). If nothing needs a change, respond with [].
+Respond with ONLY a JSON array (no explanation, no markdown fence), one
+element per entry: {"id": <id>, "name": <standard name>, "alternatives": [<other names>]}
+"""
+
+PICK_SYSTEM_PROMPT = """You match {entity} entries in a home cook's database.
+The target language is {language}. You will receive a JSON array of
+{"id": integer, "name": string, "candidates": [string, ...]}.
+
+For each entry: if it means EXACTLY the same {entity_singular} as one of its
+candidates (spelling or singular/plural variant, synonym), answer that
+candidate's name exactly as listed. If it's merely similar or related (e.g.
+"Frühlingszwiebel" vs "Zwiebel", "Vollmilch" vs "Milch"), answer null.
+
+Respond with ONLY a JSON array (no explanation, no markdown fence), one
+element per entry: {"id": <id>, "match_name": <candidate name or null>}
 """
 
 ENTITY_RULES = {
     "food": dict(entity="ingredient", entity_singular="ingredient",
-                 variants='a prepared form like "gehackte Zwiebel" of "Zwiebel"',
+                 variants='"onions" -> "Zwiebel", "gehackte Petersilie" -> "Petersilie"',
                  style="a plain, singular base noun, not a prepared form"),
     "unit": dict(entity="unit-of-measure", entity_singular="unit",
-                 variants='an abbreviation like "tbsp" / "Esslöffel" / "EL"',
+                 variants='"tbsp" / "Esslöffel" -> "EL", "grams" -> "g"',
                  style="the conventional short form used in recipes, e.g. g, ml, EL, TL, Stück"),
     "keyword": dict(entity="recipe tag", entity_singular="tag",
-                    variants='a synonym like "Nachtisch" / "Dessert" or "cakes" / "Kuchen"',
+                    variants='"cakes" -> "Kuchen", "quick" -> "Schnell"',
                     style="a short word or phrase in recipe-tag style"),
 }
 ENTITY_LABEL = {"food": "ingredient", "unit": "unit", "keyword": "tag"}
+MAX_CANDIDATES = 5
+
+
+def _prompt(template, entity):
+    for key, value in {**ENTITY_RULES[entity], "language": settings.output_language}.items():
+        template = template.replace("{" + key + "}", value)
+    return template
+
+
+def _key(name) -> str:
+    return " ".join((name or "").lower().split())
+
+
+def _similar_candidates(names, index, own_id) -> list[dict]:
+    """Existing items whose name looks close to any of `names` (fuzzy match
+    or one contained in the other), best first - for the AI to decide on."""
+    scored = {}
+    for name in names:
+        key = _key(name)
+        if not key:
+            continue
+        for other_key, item in index.items():
+            if item["id"] == own_id:
+                continue
+            contained = min(len(key), len(other_key)) >= 4 and (key in other_key or other_key in key)
+            matcher = difflib.SequenceMatcher(None, key, other_key)
+            if not contained and matcher.quick_ratio() < 0.75:
+                continue  # cheap upper bound - skips the full ratio for most pairs
+            ratio = matcher.ratio()
+            if ratio >= 0.75 or contained:
+                scored[item["id"]] = max(scored.get(item["id"], (0, item))[0], ratio), item
+    ranked = sorted(scored.values(), key=lambda pair: -pair[0])
+    return [item for _ratio, item in ranked[:MAX_CANDIDATES]]
 
 
 def _match_actions(job, entity, candidates, all_items) -> list[dict]:
-    """One AI call comparing `candidates` against all existing items. Returns
-    validated rename/merge actions (collision-resolved, consolidated)."""
+    """Matches `candidates` against the existing items WITHOUT sending the
+    whole existing list to the AI:
+    1. AI: normalize only the candidates' names (standard name + synonyms).
+    2. Code: exact match of those against existing names/plurals -> merge.
+    3. AI again, only for the few with a merely similar existing name, with
+       at most MAX_CANDIDATES names each -> merge or not.
+    Anything unmatched whose name changed becomes a rename. Returns
+    collision-resolved, consolidated actions."""
     if not candidates:
         return []
-    prompt = MATCH_SYSTEM_PROMPT
-    for key, value in {**ENTITY_RULES[entity], "language": settings.output_language}.items():
-        prompt = prompt.replace("{" + key + "}", value)
-    answers = tools_tags._complete_json(
-        job, prompt,
-        {"existing": [i["name"] for i in all_items], "new": [{"id": c["id"], "name": c["name"]} for c in candidates]},
-        max_tokens=60 * len(candidates) + 200,
-    )
-    by_name = {}
-    for item in all_items:
-        by_name.setdefault(item["name"].strip().lower(), item)
     candidate_ids = {c["id"] for c in candidates}
+    normalized = tools_tags._complete_json(
+        job, _prompt(NORMALIZE_SYSTEM_PROMPT, entity),
+        [{"id": c["id"], "name": c["name"]} for c in candidates],
+        max_tokens=50 * len(candidates) + 200,
+    )
+    normalized = {
+        n["id"]: n for n in normalized if isinstance(n, dict) and n.get("id") in candidate_ids
+        and isinstance(n.get("name"), str) and n["name"].strip()
+    }
 
-    actions = []
-    for answer in answers if isinstance(answers, list) else []:
-        if not isinstance(answer, dict) or answer.get("id") not in candidate_ids:
+    # Index of existing names (and plurals, where known) -> item.
+    index = {}
+    for item in all_items:
+        for name in (item.get("name"), item.get("plural_name")):
+            if name:
+                index.setdefault(_key(name), item)
+
+    actions, undecided = [], []
+    for cand in candidates:
+        norm = normalized.get(cand["id"])
+        if norm is None:
             continue
-        if isinstance(answer.get("match_name"), str):
-            match = by_name.get(answer["match_name"].strip().lower())
-            if match and match["id"] != answer["id"]:
-                actions.append({"type": "merge", "keep_id": match["id"], "keep_name": match["name"],
-                                "remove_ids": [answer["id"]]})
-        elif isinstance(answer.get("new_name"), str) and answer["new_name"].strip():
-            actions.append({"type": "rename", "id": answer["id"], "new_name": answer["new_name"].strip()})
+        clean = norm["name"].strip()
+        names = [clean, cand["name"]] + [a for a in norm.get("alternatives") or [] if isinstance(a, str)]
+        match = next((index[_key(n)] for n in names if _key(n) in index and index[_key(n)]["id"] != cand["id"]), None)
+        if match:
+            actions.append({"type": "merge", "keep_id": match["id"], "keep_name": match["name"], "remove_ids": [cand["id"]]})
+            continue
+        similar = _similar_candidates(names, index, cand["id"])
+        if similar:
+            undecided.append((cand, clean, similar))
+        elif clean != cand["name"]:
+            actions.append({"type": "rename", "id": cand["id"], "new_name": clean})
+
+    if undecided:
+        by_id = {cand["id"]: (cand, clean, similar) for cand, clean, similar in undecided}
+        try:
+            picks = tools_tags._complete_json(
+                job, _prompt(PICK_SYSTEM_PROMPT, entity),
+                [{"id": cand["id"], "name": clean, "candidates": [s["name"] for s in similar]}
+                 for cand, clean, similar in undecided],
+                max_tokens=40 * len(undecided) + 100,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Matching %s candidates failed: %s", entity, exc)
+            picks = []
+        picked = {p["id"]: p.get("match_name") for p in picks if isinstance(p, dict) and p.get("id") in by_id}
+        for cand_id, (cand, clean, similar) in by_id.items():
+            match = next((s for s in similar if isinstance(picked.get(cand_id), str)
+                          and _key(s["name"]) == _key(picked[cand_id])), None)
+            if match:
+                actions.append({"type": "merge", "keep_id": match["id"], "keep_name": match["name"], "remove_ids": [cand_id]})
+            elif clean != cand["name"]:
+                actions.append({"type": "rename", "id": cand_id, "new_name": clean})
+
     return resolve_name_collisions(actions, all_items)
 
 
@@ -274,7 +354,8 @@ def run_scan(job_id: str) -> None:
                 for entity in ("unit", "food", "keyword"):
                     if job.cancel_requested or not candidates[entity]:
                         continue
-                    all_items = tandoor_client.fetch_all_items(client, entity)
+                    all_items = (tools_ingredients.fetch_all_foods_full(client) if entity == "food"
+                                 else tandoor_client.fetch_all_items(client, entity))
                     by_id = {item["id"]: item for item in all_items}
                     try:
                         actions = _match_actions(job, entity, candidates[entity], all_items)

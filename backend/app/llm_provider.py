@@ -36,18 +36,34 @@ def missing_key_hint() -> str:
     )
 
 
-def complete_text(system_prompt: Optional[str], user_content: str, max_tokens: int = 4096) -> tuple[str, TokenUsage]:
+def _model(provider: str, tools: bool) -> str:
+    """The main model, or - for tools=True - the *_TOOLS_MODEL if one is set."""
+    main = {"openai": settings.openai_model, "gemini": settings.gemini_model}.get(provider, settings.claude_model)
+    if not tools:
+        return main
+    cheap = {"openai": settings.openai_tools_model, "gemini": settings.gemini_tools_model}.get(
+        provider, settings.claude_tools_model
+    )
+    return (cheap or "").strip() or main
+
+
+def complete_text(
+    system_prompt: Optional[str], user_content: str, max_tokens: int = 4096, tools: bool = False
+) -> tuple[str, TokenUsage]:
     """Sends a prompt to the configured AI provider and returns (response_text, token_usage).
-    system_prompt may be empty/None (in which case no system prompt is sent)."""
+    system_prompt may be empty/None (in which case no system prompt is sent).
+    tools=True uses the cheaper *_TOOLS_MODEL (if set) - for the maintenance
+    tools' small, structured tasks, not for cookbook extraction."""
     provider = _active_provider()
+    model = _model(provider, tools)
     if provider == "openai":
-        return _complete_openai(system_prompt, user_content, max_tokens)
+        return _complete_openai(system_prompt, user_content, max_tokens, model)
     if provider == "gemini":
-        return _complete_gemini(system_prompt, user_content, max_tokens)
-    return _complete_anthropic(system_prompt, user_content, max_tokens)
+        return _complete_gemini(system_prompt, user_content, max_tokens, model)
+    return _complete_anthropic(system_prompt, user_content, max_tokens, model)
 
 
-def _complete_anthropic(system_prompt: Optional[str], user_content: str, max_tokens: int) -> tuple[str, TokenUsage]:
+def _complete_anthropic(system_prompt: Optional[str], user_content: str, max_tokens: int, model: str) -> tuple[str, TokenUsage]:
     import anthropic
 
     if not settings.anthropic_api_key:
@@ -59,7 +75,7 @@ def _complete_anthropic(system_prompt: Optional[str], user_content: str, max_tok
         kwargs["system"] = system_prompt
 
     response = client.messages.create(
-        model=settings.claude_model,
+        model=model,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": user_content}],
         **kwargs,
@@ -73,7 +89,7 @@ def _complete_anthropic(system_prompt: Optional[str], user_content: str, max_tok
     return text, usage
 
 
-def _complete_openai(system_prompt: Optional[str], user_content: str, max_tokens: int) -> tuple[str, TokenUsage]:
+def _complete_openai(system_prompt: Optional[str], user_content: str, max_tokens: int, model: str) -> tuple[str, TokenUsage]:
     from openai import OpenAI
 
     if not settings.openai_api_key:
@@ -90,13 +106,13 @@ def _complete_openai(system_prompt: Optional[str], user_content: str, max_tokens
     # without the user having to figure that out themselves.
     try:
         response = client.chat.completions.create(
-            model=settings.openai_model,
+            model=model,
             max_completion_tokens=max_tokens,
             messages=messages,
         )
     except Exception:
         response = client.chat.completions.create(
-            model=settings.openai_model,
+            model=model,
             max_tokens=max_tokens,
             messages=messages,
         )
@@ -109,7 +125,7 @@ def _complete_openai(system_prompt: Optional[str], user_content: str, max_tokens
     return text, usage
 
 
-def _complete_gemini(system_prompt: Optional[str], user_content: str, max_tokens: int) -> tuple[str, TokenUsage]:
+def _complete_gemini(system_prompt: Optional[str], user_content: str, max_tokens: int, model: str) -> tuple[str, TokenUsage]:
     from google import genai
     from google.genai import types
 
@@ -122,7 +138,7 @@ def _complete_gemini(system_prompt: Optional[str], user_content: str, max_tokens
         config_kwargs["system_instruction"] = system_prompt
 
     response = client.models.generate_content(
-        model=settings.gemini_model,
+        model=model,
         contents=user_content,
         config=types.GenerateContentConfig(**config_kwargs),
     )
@@ -134,3 +150,9 @@ def _complete_gemini(system_prompt: Optional[str], user_content: str, max_tokens
         usage.input_tokens = getattr(meta, "prompt_token_count", 0) or 0
         usage.output_tokens = getattr(meta, "candidates_token_count", 0) or 0
     return text, usage
+
+
+def complete_tool_text(system_prompt: Optional[str], user_content: str, max_tokens: int = 4096) -> tuple[str, TokenUsage]:
+    """complete_text() with the cheaper tools model - used by the maintenance
+    tools and scripts (matching, tagging, plurals, nutrition, seasons)."""
+    return complete_text(system_prompt, user_content, max_tokens, tools=True)

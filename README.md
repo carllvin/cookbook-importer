@@ -99,6 +99,7 @@ keeping an eye on cost.
 | `ANTHROPIC_API_KEY` / `CLAUDE_MODEL` | – / `claude-sonnet-4-6` | Only relevant when `AI_PROVIDER=anthropic` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | – / `gpt-4o` | Only relevant when `AI_PROVIDER=openai` |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | – / `gemini-2.5-flash` | Only relevant when `AI_PROVIDER=gemini` |
+| `CLAUDE_TOOLS_MODEL` / `OPENAI_TOOLS_MODEL` / `GEMINI_TOOLS_MODEL` | `claude-haiku-4-5-20251001` / – / – | Cheaper model for the maintenance tools (matching, tags, seasons, plurals, nutrition). Cookbook extraction and recipe translation keep the main model. Empty = main model |
 | `OUTPUT_LANGUAGE` | `English` | Target language for title, description, ingredients, steps, tags **and this app's UI language** — independent of the source PDF's language |
 | `CONVERT_TO_METRIC` | `true` | Converts cups/oz/lb/°F/inch to g/ml/°C/cm automatically |
 | `CHECK_DUPLICATES` | `true` | Checks recipe titles against those already in Tandoor before import |

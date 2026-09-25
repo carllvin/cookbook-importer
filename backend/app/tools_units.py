@@ -100,7 +100,7 @@ def run_scan(job_id: str) -> None:
                 tool_jobs.save_tool_job(job)
                 try:
                     system_prompt = REVIEW_SYSTEM_PROMPT.replace("{language}", settings.output_language)
-                    text_out, usage = llm_provider.complete_text(
+                    text_out, usage = llm_provider.complete_tool_text(
                         system_prompt,
                         json.dumps(
                             [{"id": u["id"], "name": u["name"], "plural_name": u.get("plural_name")} for u in chunk],
