@@ -1,8 +1,7 @@
 """Maps the four nutrients the tools estimate (energy, protein, fat, carbs) to
 the property types that ALREADY exist in Tandoor - "Kalorien", "Proteine",
 "Fett", "Kohlenhydrate" or whatever they're called there - instead of
-creating new ones. Also used by the property clean-up tool to find
-duplicates (e.g. "Energy" next to "Kalorien") and merge them."""
+creating new ones."""
 from __future__ import annotations
 
 import re
@@ -131,15 +130,3 @@ def convert(amount, key, to_unit) -> float:
         return round(amount * 1000, 1)
     return amount
 
-
-def convert_between(amount, key, from_unit, to_unit):
-    """For merging two property types of the same nutrient with different
-    units (e.g. kJ -> kcal)."""
-    if amount is None:
-        return None
-    f, t = (from_unit or "").strip().lower(), (to_unit or "").strip().lower()
-    if f == t:
-        return amount
-    factors = {("kj", "kcal"): 1 / 4.184, ("kcal", "kj"): 4.184, ("mg", "g"): 0.001, ("g", "mg"): 1000}
-    factor = factors.get((f, t))
-    return round(amount * factor, 2) if factor else amount
