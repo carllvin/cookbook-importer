@@ -8,14 +8,19 @@ class Settings(BaseSettings):
     # Anthropic / Claude
     anthropic_api_key: str = ""
     claude_model: str = "claude-sonnet-4-6"
+    # Cheaper model for the maintenance tools (matching, tagging, plurals...);
+    # empty = use claude_model for those too
+    claude_tools_model: str = "claude-haiku-4-5-20251001"
 
     # OpenAI / ChatGPT
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
+    openai_tools_model: str = ""       # cheaper model for the maintenance tools; empty = openai_model
 
     # Google / Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    gemini_tools_model: str = ""       # cheaper model for the maintenance tools; empty = gemini_model
 
     # Tandoor
     tandoor_url: str = ""      # e.g. https://recipes.myserver.com (no trailing slash)
@@ -31,6 +36,7 @@ class Settings(BaseSettings):
 
     # Housekeeping
     job_retention_hours: int = 48      # delete jobs (and their uploaded PDF/images) older than this many hours
+    auto_process_interval_hours: float = 0  # run "Process new recipes" automatically every N hours; 0 = off
 
     # OCR (for scanned PDF pages with no text layer, and for directly uploaded photos)
     ocr_languages: str = "eng"         # Tesseract language code(s), '+'-joined, e.g. "eng+deu". Installed by default: eng, deu, fra, ita, spa

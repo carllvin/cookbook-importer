@@ -488,6 +488,20 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+function matchBadgeHtml(ing) {
+  if (ing.tandoor_match === 'exists') {
+    return `<span class="ing-match exists" title="${escapeHtml(t('matchExistsTitle'))}">✓</span>`;
+  }
+  if (ing.tandoor_match === 'matched') {
+    const title = tf('matchMatchedTitle', { original: ing.original_name || '' });
+    return `<span class="ing-match matched" role="button" title="${escapeHtml(title)}">↺</span>`;
+  }
+  if (ing.tandoor_match === 'new') {
+    return `<span class="ing-match new" title="${escapeHtml(t('matchNewTitle'))}">${t('matchNewLabel')}</span>`;
+  }
+  return '';
+}
+
 function renderDetail(r) {
   const detail = el('recipe-detail');
 
@@ -498,12 +512,21 @@ function renderDetail(r) {
       <span class="ing-drag-handle" title="${t('dragToReorder')}">⠿</span>
       <input class="ing-amount" value="${ing.amount ?? ''}" placeholder="${t('placeholderAmount')}" />
       <input class="ing-unit" value="${escapeHtml(ing.unit ?? '')}" placeholder="${t('placeholderUnit')}" />
-      <input class="ing-name" value="${escapeHtml(ing.name)}" placeholder="${t('placeholderIngredient')}" />
+      <div class="ing-name-wrap">
+        <input class="ing-name" value="${escapeHtml(ing.name)}" placeholder="${t('placeholderIngredient')}" />
+        ${matchBadgeHtml(ing)}
+      </div>
       <select class="ing-step" title="${t('fieldStepAssignment')}">${stepOptions || '<option value="0">1</option>'}</select>
       <input class="ing-note" value="${escapeHtml(ing.note ?? '')}" placeholder="${t('placeholderNote')}" />
     </div>
   `;
   }).join('') || `<p style="color:#8f9689;font-size:0.88rem;">${t('noIngredients')}</p>`;
+
+  const matchCounts = { exists: 0, matched: 0, new: 0 };
+  r.ingredients.forEach((ing) => { if (ing.tandoor_match) matchCounts[ing.tandoor_match] += 1; });
+  const matchSummary = (matchCounts.exists + matchCounts.matched + matchCounts.new) > 0
+    ? `<div class="ing-match-summary">${escapeHtml(tf('matchSummary', matchCounts))}</div>`
+    : '';
 
   const stepsHtml = r.steps.map((s, i) => `
     <div class="step-row" data-idx="${i}">
@@ -570,6 +593,7 @@ function renderDetail(r) {
     <div class="tags-row">${tagsHtml}</div>
 
     <div class="section-title">${t('fieldIngredients')} <span class="hint-inline">(${t('fieldStepAssignment')})</span></div>
+    ${matchSummary}
     <div id="ingredients-wrap">${ingredientsHtml}</div>
 
     <div class="section-title">${t('fieldSteps')}</div>
@@ -599,14 +623,24 @@ function renderDetail(r) {
     r.prep_time_minutes = numOrNull(detail.querySelector('#f-prep').value);
     r.cook_time_minutes = numOrNull(detail.querySelector('#f-cook').value);
 
-    r.ingredients = Array.from(detail.querySelectorAll('.ingredient-row')).map((row) => ({
-      amount: numOrNull(row.querySelector('.ing-amount').value),
-      unit: row.querySelector('.ing-unit').value || null,
-      name: row.querySelector('.ing-name').value,
-      note: row.querySelector('.ing-note').value || null,
-      group: null,
-      step_index: numOrNull(row.querySelector('.ing-step')?.value) ?? 0,
-    }));
+    const previous = r.ingredients;
+    r.ingredients = Array.from(detail.querySelectorAll('.ingredient-row')).map((row) => {
+      const before = previous[Number(row.dataset.idx)] || {};
+      const name = row.querySelector('.ing-name').value;
+      // Keep the Tandoor match info only while the name is untouched - a
+      // hand-edited name hasn't been checked against Tandoor.
+      const unchanged = name === before.name;
+      return {
+        amount: numOrNull(row.querySelector('.ing-amount').value),
+        unit: row.querySelector('.ing-unit').value || null,
+        name,
+        note: row.querySelector('.ing-note').value || null,
+        group: null,
+        step_index: numOrNull(row.querySelector('.ing-step')?.value) ?? 0,
+        tandoor_match: unchanged ? (before.tandoor_match ?? null) : null,
+        original_name: unchanged ? (before.original_name ?? null) : null,
+      };
+    });
 
     r.steps = Array.from(detail.querySelectorAll('.step-row')).map((row) => ({
       instruction: row.querySelector('.step-instruction').value,
@@ -631,6 +665,19 @@ function renderDetail(r) {
   });
   detail.querySelectorAll('select').forEach((sel) => {
     sel.addEventListener('change', save);
+  });
+
+  // Undo a match: back to the extracted name, which becomes a new ingredient.
+  detail.querySelectorAll('.ing-match.matched').forEach((badge) => {
+    badge.addEventListener('click', () => {
+      const ing = r.ingredients[Number(badge.closest('.ingredient-row').dataset.idx)];
+      if (!ing || !ing.original_name) return;
+      ing.name = ing.original_name;
+      ing.original_name = null;
+      ing.tandoor_match = 'new';
+      patchRecipe(r.id, { ingredients: r.ingredients });
+      renderDetail(r);
+    });
   });
 
   // Drag & drop to reorder ingredients
@@ -898,7 +945,52 @@ el('tools-nav-btn').addEventListener('click', () => {
   el('tools-screen').classList.remove('hidden');
   el('tools-cards-view').classList.remove('hidden');
   el('tools-run-view').classList.add('hidden');
+  loadNewRecipesStatus();
 });
+
+async function loadNewRecipesStatus() {
+  const label = el('new-recipes-status');
+  const btn = el('new-recipes-start-btn');
+  btn.disabled = true;
+  label.textContent = t('toolNewRecipesChecking');
+  try {
+    const res = await fetch('/api/tools/new-recipes/status');
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (data.baseline_created) {
+      label.textContent = tf('toolNewRecipesBaseline', { count: data.baseline_count });
+    } else {
+      label.textContent = data.new_count > 0 ? tf('toolNewRecipesCount', { count: data.new_count }) : t('toolNewRecipesNone');
+    }
+    btn.disabled = data.new_count === 0;
+
+    const auto = el('new-recipes-auto');
+    if (data.auto_interval_hours > 0) {
+      const next = data.next_auto_run_at
+        ? new Date(data.next_auto_run_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+        : '–';
+      auto.textContent = tf('toolNewRecipesAuto', { hours: data.auto_interval_hours, next });
+      auto.classList.remove('hidden');
+    } else {
+      auto.classList.add('hidden');
+    }
+
+    const list = el('new-recipes-open-jobs');
+    list.innerHTML = (data.open_jobs || []).map((job) => {
+      const when = new Date(job.created_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      const label = job.status === 'scanning'
+        ? tf('toolNewRecipesJobRunning', { when })
+        : tf(job.auto ? 'toolNewRecipesJobAuto' : 'toolNewRecipesJobManual', { when, count: job.pending });
+      return `<div class="new-recipes-open-job"><span>${escapeHtml(label)}</span>
+        <button class="btn secondary" type="button" data-job-id="${job.id}">${t('toolNewRecipesOpenJob')}</button></div>`;
+    }).join('');
+    list.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => openToolJob(b.dataset.jobId, t('toolNewRecipesTitle')));
+    });
+  } catch (e) {
+    label.textContent = `${t('toolNewRecipesStatusFailed')}: ${e.message}`;
+  }
+}
 
 el('tools-back-btn').addEventListener('click', () => {
   clearTimeout(toolsState.pollTimer);
@@ -907,6 +999,7 @@ el('tools-back-btn').addEventListener('click', () => {
   toolsState.selected.clear();
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
+  loadNewRecipesStatus();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
@@ -917,6 +1010,26 @@ document.querySelectorAll('.tool-start-btn').forEach((btn) => {
 });
 
 async function startTool(endpoint, title) {
+  resetToolRunView(title);
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    toolsState.jobId = data.job_id;
+    pollToolJob();
+  } catch (e) {
+    showToolError(`${t('toolStartFailed')}: ${e.message}`);
+  }
+}
+
+// Opens a run that already exists (e.g. one the automatic schedule started).
+function openToolJob(jobId, title) {
+  resetToolRunView(title);
+  toolsState.jobId = jobId;
+  pollToolJob();
+}
+
+function resetToolRunView(title) {
   el('tools-cards-view').classList.add('hidden');
   el('tools-run-view').classList.remove('hidden');
   el('tools-run-title').textContent = title;
@@ -932,16 +1045,6 @@ async function startTool(endpoint, title) {
   el('tools-bulk-status').textContent = '';
   toolsState.job = null;
   toolsState.selected.clear();
-
-  try {
-    const res = await fetch(endpoint, { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    toolsState.jobId = data.job_id;
-    pollToolJob();
-  } catch (e) {
-    showToolError(`${t('toolStartFailed')}: ${e.message}`);
-  }
 }
 
 el('tools-cancel-btn').addEventListener('click', async () => {

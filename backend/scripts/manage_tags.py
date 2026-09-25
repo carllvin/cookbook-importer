@@ -134,7 +134,7 @@ If nothing needs a change, respond with [].
 
 def translate_review_chunk(tags: list[dict], language: str, tracker: TokenTracker) -> list[dict]:
     system_prompt = TRANSLATE_SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
+    text_out, usage = llm_provider.complete_tool_text(
         system_prompt,
         json.dumps([{"id": t["id"], "name": t["name"]} for t in tags], ensure_ascii=False),
         max_tokens=8000,
@@ -247,7 +247,7 @@ If nothing needs merging, respond with [].
 
 def simplify_review_chunk(tags: list[dict], language: str, tracker: TokenTracker) -> list[dict]:
     system_prompt = SIMPLIFY_SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
+    text_out, usage = llm_provider.complete_tool_text(
         system_prompt,
         json.dumps([{"id": t["id"], "name": t["name"]} for t in tags], ensure_ascii=False),
         max_tokens=8000,
@@ -371,7 +371,7 @@ def guess_season(recipe: dict, language: str, tracker: TokenTracker) -> str | No
         "description": recipe.get("description"),
         "tags": [kw["name"] for kw in recipe.get("keywords", [])],
     }, ensure_ascii=False)
-    text_out, usage = llm_provider.complete_text(system_prompt, user_content, max_tokens=20)
+    text_out, usage = llm_provider.complete_tool_text(system_prompt, user_content, max_tokens=20)
     tracker.add(usage)
     text_out = text_out.strip().strip(".").strip()
     if text_out.lower() == "none" or not text_out:
@@ -487,7 +487,7 @@ def suggest_tags_for_recipe(recipe: dict, vocabulary: list[str], language: str, 
         "existing_tags": [kw["name"] for kw in recipe.get("keywords", [])],
         "vocabulary": vocabulary,
     }, ensure_ascii=False)
-    text_out, usage = llm_provider.complete_text(system_prompt, user_content, max_tokens=200)
+    text_out, usage = llm_provider.complete_tool_text(system_prompt, user_content, max_tokens=200)
     tracker.add(usage)
     text_out = text_out.strip().strip("`")
     if text_out.startswith("json"):

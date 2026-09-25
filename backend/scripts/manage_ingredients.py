@@ -108,7 +108,7 @@ If nothing needs a change, respond with [].
 
 def review_chunk(foods, language, tracker):
     system_prompt = REVIEW_SYSTEM_PROMPT.replace("{language}", language)
-    text_out, usage = llm_provider.complete_text(
+    text_out, usage = llm_provider.complete_tool_text(
         system_prompt,
         json.dumps([{"id": f["id"], "name": f["name"]} for f in foods], ensure_ascii=False),
         max_tokens=8000,
@@ -286,7 +286,7 @@ def estimate_metadata(food_name, needs_plural, needs_category, categories, langu
         "needs_plural": needs_plural,
         "needs_category": needs_category,
     }, ensure_ascii=False)
-    text_out, usage = llm_provider.complete_text(system_prompt, user_content, max_tokens=200)
+    text_out, usage = llm_provider.complete_tool_text(system_prompt, user_content, max_tokens=200)
     tracker.add(usage)
     text_out = text_out.strip().strip("`")
     if text_out.startswith("json"):
@@ -456,7 +456,7 @@ def get_or_create_property_type(client, endpoint, name, unit):
 
 
 def estimate_nutrition(food_name, tracker):
-    text_out, usage = llm_provider.complete_text(NUTRITION_SYSTEM_PROMPT, f"Food: {food_name}", max_tokens=200)
+    text_out, usage = llm_provider.complete_tool_text(NUTRITION_SYSTEM_PROMPT, f"Food: {food_name}", max_tokens=200)
     tracker.add(usage)
     text_out = text_out.strip().strip("`")
     if text_out.startswith("json"):
