@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs
+from . import llm_provider, nutrition_properties, tandoor_client, tool_jobs
 from .config import settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
@@ -222,13 +222,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
 
 ENRICH_CHUNK_SIZE = 40
 SUPERMARKET_CATEGORY_ENDPOINT = "supermarket-category"
-PROPERTY_TYPE_ENDPOINT_CANDIDATES = ["property-type", "food-property-type", "propertytype"]
-NUTRIENTS = [  # (Tandoor property type name, unit, key in the AI's answer)
-    ("Energy", "kcal", "energy_kcal"),
-    ("Protein", "g", "protein_g"),
-    ("Fat", "g", "fat_g"),
-    ("Carbohydrates", "g", "carbs_g"),
-]
+NUTRIENT_KEYS = ["energy_kcal", "protein_g", "fat_g", "carbs_g"]  # keys in the AI's answer
 
 ENRICH_SYSTEM_PROMPT = """You fill in missing data for ingredient entries in
 a home cook's database. The language is {language}. You will receive a JSON
@@ -293,7 +287,7 @@ def _clean_nutrition(nutrition):
     if not isinstance(nutrition, dict):
         return None
     cleaned = {"basis": "ml" if nutrition.get("basis") == "ml" else "g"}
-    for _name, _unit, key in NUTRIENTS:
+    for key in NUTRIENT_KEYS:
         value = nutrition.get(key)
         if isinstance(value, (int, float)) and value >= 0:
             cleaned[key] = round(float(value), 1)
@@ -315,13 +309,14 @@ def _describe_enrich(name, plural, nutrition, category):
     return f"{name!r}: " + " · ".join(parts)
 
 
-def enrich_targets(foods, categories) -> list[dict]:
-    """The subset of full food dicts that miss a plural, nutrition, or (when
-    any categories exist to pick from) a supermarket category."""
+def enrich_targets(foods, categories, nutrition_available=True) -> list[dict]:
+    """The subset of full food dicts that miss a plural, nutrition (only
+    asked when matching property types exist in Tandoor), or (when any
+    categories exist to pick from) a supermarket category."""
     targets = []
     for food in foods:
         needs_plural = not (food.get("plural_name") or "").strip()
-        needs_nutrition = not food.get("properties")
+        needs_nutrition = nutrition_available and not food.get("properties")
         # No existing categories -> nothing to pick from, so never ask.
         needs_category = bool(categories) and not food.get("supermarket_category")
         if needs_plural or needs_nutrition or needs_category:
@@ -404,7 +399,12 @@ def run_enrich_scan(job_id: str) -> None:
             job.progress_label = "Loading ingredients..."
             tool_jobs.save_tool_job(job)
             categories = fetch_supermarket_categories(client)
-            targets = enrich_targets(fetch_all_foods_full(client), categories)
+            try:
+                nutrition_available = bool(nutrition_properties.existing_nutrient_types(client))
+            except tandoor_client.TandoorError as exc:
+                log.warning("Nutrition skipped - property types unavailable: %s", exc)
+                nutrition_available = False
+            targets = enrich_targets(fetch_all_foods_full(client), categories, nutrition_available)
             job.progress_total = len(targets)
             job.cost_estimate = format_cost_estimate(len(targets), "chunked_enrich")
             tool_jobs.save_tool_job(job)
@@ -419,32 +419,6 @@ def run_enrich_scan(job_id: str) -> None:
         job.status = "error"
         job.error = str(exc)
         tool_jobs.save_tool_job(job)
-
-
-def _get_or_create_property_type(client, name, unit):
-    """Returns the {"id", "name"} of the property type called `name`,
-    creating it (with `unit`) if it doesn't exist yet. Tries the endpoint
-    names used by different Tandoor versions."""
-    last_error = None
-    for endpoint in PROPERTY_TYPE_ENDPOINT_CANDIDATES:
-        resp = client.get(f"/{endpoint}/", params={"query": name, "page_size": 50})
-        if resp.status_code == 404:
-            continue
-        if resp.status_code != 200:
-            last_error = f"{resp.status_code} {resp.text[:200]}"
-            continue
-        data = resp.json()
-        for item in data.get("results", data) if isinstance(data, dict) else data:
-            if _same_word(item.get("name"), name):
-                return {"id": item["id"], "name": item["name"]}
-        resp = client.post(f"/{endpoint}/", json={"name": name, "unit": unit})
-        if resp.status_code not in (200, 201):
-            raise tandoor_client.TandoorError(f"Could not create property type {name!r}: {resp.status_code} {resp.text[:300]}")
-        return {"id": resp.json()["id"], "name": name}
-    raise tandoor_client.TandoorError(
-        f"No property-type endpoint found (tried {PROPERTY_TYPE_ENDPOINT_CANDIDATES})"
-        + (f": {last_error}" if last_error else "")
-    )
 
 
 def apply_enrich_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
@@ -476,13 +450,22 @@ def apply_enrich_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
 
             nutrition = detail.get("nutrition")
             if nutrition and not food.get("properties"):
+                # Only property types that already exist ("Kalorien",
+                # "Proteine", ...) - never create new ones.
+                types = nutrition_properties.existing_nutrient_types(client)
                 properties = []
-                for name, unit, key in NUTRIENTS:
-                    if key in nutrition:
+                for key in NUTRIENT_KEYS:
+                    pt = types.get(key)
+                    if key in nutrition and pt is not None:
                         properties.append({
-                            "property_type": _get_or_create_property_type(client, name, unit),
-                            "property_amount": nutrition[key],
+                            "property_type": {"id": pt["id"], "name": pt["name"]},
+                            "property_amount": nutrition_properties.convert(nutrition[key], key, pt.get("unit")),
                         })
+                if not properties:
+                    raise tandoor_client.TandoorError(
+                        "No matching nutrition property types exist in Tandoor (e.g. Kalorien, Proteine, Fett, "
+                        "Kohlenhydrate) - create them there first; this tool never creates new ones."
+                    )
                 payload["properties"] = properties
                 # The values are per 100 g/ml - tell Tandoor, unless the food
                 # already has its own reference amount configured.
