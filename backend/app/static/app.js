@@ -981,6 +981,53 @@ el('tools-nav-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   loadNewRecipesStatus();
   loadOpenRuns();
+  loadMealPlanOptions();
+});
+
+// ---------- Meal plan ----------
+
+function nextMonday() {
+  const d = new Date();
+  d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7));
+  return d.toISOString().slice(0, 10);
+}
+
+async function loadMealPlanOptions() {
+  if (!el('mp-start').value) el('mp-start').value = nextMonday();
+  const select = el('mp-meal');
+  const hint = el('mp-hint');
+  try {
+    const res = await fetch('/api/tools/meal-plan/options');
+    const data = await res.json();
+    const previous = select.value;
+    select.innerHTML = data.meal_types.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    if (previous) select.value = previous;
+    // Default to dinner if there is one.
+    if (!previous) {
+      const dinner = data.meal_types.find((m) => /abend|dinner|dîner|cena/i.test(m.name));
+      if (dinner) select.value = dinner.id;
+    }
+    const none = data.meal_types.length === 0;
+    hint.textContent = none ? t('mealPlanNoMealTypes') : '';
+    hint.classList.toggle('hidden', !none);
+    el('mp-start-btn').disabled = none;
+  } catch (e) {
+    hint.textContent = `${t('toolNewRecipesStatusFailed')}: ${e.message}`;
+    hint.classList.remove('hidden');
+  }
+}
+
+el('meal-plan-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const select = el('mp-meal');
+  startTool('/api/tools/meal-plan', t('toolMealPlanTitle'), {
+    start_date: el('mp-start').value,
+    days: Number(el('mp-days').value),
+    meal_type: { id: Number(select.value), name: select.options[select.selectedIndex]?.textContent || '' },
+    servings: Number(el('mp-servings').value),
+    wishes: el('mp-wishes').value,
+    add_to_shopping: el('mp-shopping').checked,
+  });
 });
 
 // Runs of the other tools that still have suggestions to review - they're
@@ -1075,10 +1122,12 @@ document.querySelectorAll('.tool-start-btn').forEach((btn) => {
   });
 });
 
-async function startTool(endpoint, title) {
+async function startTool(endpoint, title, body) {
   resetToolRunView(title);
   try {
-    const res = await fetch(endpoint, { method: 'POST' });
+    const res = await fetch(endpoint, body
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     toolsState.jobId = data.job_id;

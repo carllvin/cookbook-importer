@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, import_matching, jobs, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import image_gen, import_matching, jobs, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -521,6 +521,7 @@ _TOOL_SCANS = {
     "new_recipes": tools_new_recipes.run_scan,
     "conversions": tools_conversions.run_scan,
     "recipes_restructure": recipe_restructure.run_scan,
+    "meal_plan": tools_meal_plan.run_scan,
 }
 
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
@@ -537,6 +538,7 @@ _TOOL_APPLY = {
     "new_recipes": tools_new_recipes.apply_suggestion,
     "conversions": tools_conversions.apply_suggestion,
     "recipes_restructure": recipe_restructure.apply_suggestion,
+    "meal_plan": tools_meal_plan.apply_suggestion,
 }
 
 
@@ -589,6 +591,33 @@ async def start_units_review():
 @app.post("/api/tools/recipes/translate")
 async def start_recipes_translate():
     return _start_tool_job("recipes_translate")
+
+
+@app.get("/api/tools/meal-plan/options")
+async def meal_plan_options():
+    try:
+        return await asyncio.to_thread(tools_meal_plan.options)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc), "meal_types": []}, status_code=200)
+
+
+@app.post("/api/tools/meal-plan")
+async def start_meal_plan(body: dict = Body(...)):
+    meal_type = body.get("meal_type") or {}
+    if not meal_type.get("id"):
+        raise HTTPException(400, "Please choose a meal type.")
+    job = tool_jobs.create_tool_job("meal_plan")
+    job.meta["params"] = {
+        "start_date": body.get("start_date"),
+        "days": body.get("days") or 7,
+        "meal_type": {"id": meal_type["id"], "name": meal_type.get("name", "")},
+        "servings": body.get("servings") or 2,
+        "wishes": (body.get("wishes") or "")[:500],
+        "add_to_shopping": bool(body.get("add_to_shopping")),
+    }
+    tool_jobs.save_tool_job(job)
+    threading.Thread(target=tools_meal_plan.run_scan, args=(job.id,), daemon=True).start()
+    return {"job_id": job.id}
 
 
 @app.post("/api/tools/recipes/restructure")

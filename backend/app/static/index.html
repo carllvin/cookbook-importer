@@ -40,6 +40,21 @@
           <div id="new-recipes-open-jobs" class="new-recipes-open-jobs"></div>
           <button id="new-recipes-start-btn" class="btn tool-start-btn" data-tool="new_recipes" data-endpoint="/api/tools/new-recipes/process" data-i18n="toolStartBtn" disabled>Start</button>
         </div>
+        <div class="tool-card tool-card-featured">
+          <div class="tool-card-icon">📅</div>
+          <h3 data-i18n="toolMealPlanTitle">Meal plan &amp; shopping list</h3>
+          <p data-i18n="toolMealPlanDesc">Picks one of your recipes per day - by season, variety and your wishes - and adds them to Tandoor's meal plan, optionally with the ingredients on the shopping list.</p>
+          <form id="meal-plan-form" class="meal-plan-form">
+            <label><span data-i18n="mealPlanStart">Start</span><input id="mp-start" type="date" required /></label>
+            <label><span data-i18n="mealPlanDays">Days</span><input id="mp-days" type="number" min="1" max="14" value="7" required /></label>
+            <label><span data-i18n="mealPlanMeal">Meal</span><select id="mp-meal" required></select></label>
+            <label><span data-i18n="mealPlanServings">Servings</span><input id="mp-servings" type="number" min="1" max="20" value="2" required /></label>
+            <label class="mp-wide"><span data-i18n="mealPlanWishes">Wishes</span><input id="mp-wishes" type="text" data-i18n-placeholder="mealPlanWishesPlaceholder" placeholder="e.g. 2x vegetarian, quick on weekdays" /></label>
+            <label class="mp-wide mp-check"><input id="mp-shopping" type="checkbox" checked /> <span data-i18n="mealPlanShopping">Add ingredients to the shopping list</span></label>
+            <p id="mp-hint" class="new-recipes-auto hidden mp-wide"></p>
+            <button id="mp-start-btn" class="btn" type="submit" data-i18n="mealPlanStartBtn">Plan</button>
+          </form>
+        </div>
         <div class="tools-grid">
           <div class="tool-card">
             <div class="tool-card-icon">🥕</div>
