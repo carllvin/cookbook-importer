@@ -399,7 +399,18 @@ async def import_selected(job_id: str, body: dict = Body(default={})):
             })
         jobs.save_job(job)
 
-    return {"results": results, "cookbook_name": cookbook_name or None, "cookbook_warning": cookbook_warning}
+    # Straight into post-processing (nutrition, conversions, matching, tags
+    # ...) - suggestions then wait under Tools. Never blocks the import.
+    post_processing_job_id = None
+    imported_ids = [r["tandoor_recipe_id"] for r in results if r["status"] == "imported" and r["tandoor_recipe_id"]]
+    if imported_ids:
+        try:
+            post_processing_job_id = await asyncio.to_thread(tools_new_recipes.start_after_import, imported_ids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not start post-processing after import: %s", exc)
+
+    return {"results": results, "cookbook_name": cookbook_name or None, "cookbook_warning": cookbook_warning,
+            "post_processing_job_id": post_processing_job_id}
 
 
 @app.post("/api/jobs/{job_id}/recipes/{recipe_id}/undo-import")

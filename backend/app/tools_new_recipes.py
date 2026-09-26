@@ -158,6 +158,29 @@ def auto_run_once() -> str | None:
     return job.id
 
 
+def start_after_import(imported_recipe_ids) -> str | None:
+    """Called right after recipes were imported through this app: starts a
+    new-recipes run in the background (non-blocking) and returns its job id,
+    or None if nothing was started. If there's no baseline yet, it's created
+    now - from every recipe EXCEPT the ones just imported, so those still
+    count as new."""
+    if not imported_recipe_ids or not llm_provider.is_configured():
+        return None
+    imported = set(imported_recipe_ids)
+    with _store_lock:
+        if _load_store() is None:
+            with tandoor_client.get_client() as client:
+                existing = [rid for rid in list_recipe_ids(client) if rid not in imported]
+            _save_store({"baseline_at": time.time(), "recipe_ids": sorted(existing)})
+    job = tool_jobs.create_tool_job("new_recipes")
+    job.meta["auto"] = True
+    job.meta["trigger"] = "import"
+    tool_jobs.save_tool_job(job)
+    log.info("New-recipes run started after import (job %s)", job.id)
+    threading.Thread(target=run_scan, args=(job.id,), daemon=True).start()
+    return job.id
+
+
 async def auto_run_loop() -> None:
     """Background loop (started by main.py when AUTO_PROCESS_INTERVAL_HOURS > 0):
     every N hours, process recipes added since the last run. Translations are
@@ -468,9 +491,10 @@ def run_scan(job_id: str) -> None:
                             summary=_describe(entity, action, by_id), detail={**action, "entity": entity},
                         ))
 
-                # 3. Plural / nutrition / category for the new ingredients
-                # that stay (not merged away).
-                keep_food_ids = {f["id"] for f in candidates["food"]} - removed_food_ids
+                # 3. Plural / nutrition / category for ALL ingredients the new
+                # recipes use - also existing ones that never got them - as
+                # they'll be once the pending merges are applied.
+                keep_food_ids = {merged_into["food"].get(fid, fid) for fid in used["food"]} - removed_food_ids
                 if keep_food_ids and not job.cancel_requested:
                     foods = []
                     for food_id in keep_food_ids:

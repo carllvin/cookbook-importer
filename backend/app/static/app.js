@@ -860,7 +860,7 @@ async function runImport(recipeIds) {
       r.import_error = result.error;
       r.tandoor_recipe_id = result.tandoor_recipe_id;
     });
-    showImportSummary(data.results, data.cookbook_name, data.cookbook_warning);
+    showImportSummary(data.results, data.cookbook_name, data.cookbook_warning, data.post_processing_job_id);
   } catch (e) {
     alert(`${t('importFailedAlertPrefix')} ${e.message}`);
   } finally {
@@ -882,7 +882,7 @@ el('retry-failed-btn').addEventListener('click', () => {
   runImport(failedIds);
 });
 
-function showImportSummary(results, cookbookName, cookbookWarning) {
+function showImportSummary(results, cookbookName, cookbookWarning, postProcessingJobId) {
   const total = results.length;
   const ok = results.filter((r) => r.status === 'imported').length;
   const failed = total - ok;
@@ -915,6 +915,9 @@ function showImportSummary(results, cookbookName, cookbookWarning) {
   }
   if (ok > 0) {
     lines.push(t('modalOpenInListHint'));
+  }
+  if (postProcessingJobId) {
+    lines.push(t('modalPostProcessingLine'));
   }
   body.textContent = lines.join('\n');
 
