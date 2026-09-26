@@ -8,6 +8,9 @@ afterwards are picked up.
 
 Per run, for the new recipes only:
 1. Translate recipe text into OUTPUT_LANGUAGE - applied automatically.
+   Then, where needed (decided locally): revise the content - split a long
+   method into steps, assign ingredients to the steps using them, fill in
+   servings/times (reviewed like the rest).
 2. Match the units, ingredients and tags these recipes introduced against
    the existing ones (translate / merge into an existing entry).
 3. Fill in plural, nutrition and supermarket category for new ingredients.
@@ -26,7 +29,7 @@ import threading
 import time
 import uuid
 
-from . import llm_provider, nutrition_properties, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
+from . import llm_provider, nutrition_properties, recipe_restructure, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
 from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import find_recipes_by_filter, resolve_name_collisions
@@ -355,8 +358,8 @@ def run_scan(job_id: str) -> None:
                 if resp.status_code == 200:
                     recipes.append(resp.json())
             job.cost_estimate = (
-                f"{len(recipes)} new recipe(s): up to one AI call per recipe needing translation, "
-                f"plus a few batched calls for ingredients, units and tags."
+                f"{len(recipes)} new recipe(s): up to one AI call per recipe needing translation and one per "
+                f"recipe needing a structural revision, plus a few batched calls for ingredients, units and tags."
             )
             tool_jobs.save_tool_job(job)
             suggestions: list[ToolSuggestion] = []
@@ -390,6 +393,30 @@ def run_scan(job_id: str) -> None:
                     suggestion.error = f"Translation failed: {exc}"
                 suggestions.append(suggestion)
             recipe_ids = {r["id"] for r in recipes}
+
+            # 1b. Content revision - split long methods into steps, assign
+            # ingredients to the steps using them, fill servings/times. Only
+            # for recipes that need it (decided locally); reviewed, not
+            # auto-applied.
+            for recipe in recipes:
+                if job.cancel_requested:
+                    break
+                if not recipe_restructure.needs_restructure(recipe):
+                    continue
+                job.progress_label = f"Revising {recipe.get('name', '')!r}..."
+                tool_jobs.save_tool_job(job)
+                try:
+                    plan, usage = recipe_restructure.restructure_plan(recipe, settings.output_language)
+                    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+                    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Revision of recipe %s failed: %s", recipe.get("id"), exc)
+                    continue
+                summary, preview = recipe_restructure.describe_plan(recipe, plan)
+                suggestions.append(ToolSuggestion(
+                    id=uuid.uuid4().hex[:10], kind="restructure_recipe", summary=summary, preview=preview,
+                    detail={"recipe_id": recipe["id"], "plan": plan},
+                ))
 
             # 2. Match units, ingredients and tags against the existing ones.
             removed_food_ids = set()
@@ -506,6 +533,30 @@ def after_action(job) -> None:
     tool_jobs.save_tool_job(job)
 
 
+def _apply_restructure(job, suggestion) -> ToolSuggestion:
+    if suggestion.status != "pending":
+        return suggestion
+    try:
+        with tandoor_client.get_client() as client:
+            recipe_id = suggestion.detail["recipe_id"]
+            resp = client.get(f"/recipe/{recipe_id}/")
+            resp.raise_for_status()
+            recipe = resp.json()  # fresh - ingredient merges may have run since the scan
+            plan = suggestion.detail["plan"]
+            if not recipe_restructure.same_ingredients(recipe, plan):
+                raise tandoor_client.TandoorError("The recipe's ingredients changed since the scan - rescan to revise it.")
+            resp = client.patch(f"/recipe/{recipe_id}/", json=recipe_restructure.build_payload(recipe, plan))
+            if resp.status_code not in (200, 201):
+                raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+        suggestion.status = "applied"
+    except Exception as exc:  # noqa: BLE001
+        suggestion.status = "error"
+        suggestion.error = str(exc)
+    finally:
+        tool_jobs.save_tool_job(job)
+    return suggestion
+
+
 def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     """Routes each suggestion to the tool that already knows how to apply it."""
     job = tool_jobs.get_tool_job(job_id)
@@ -516,7 +567,9 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
         raise tandoor_client.TandoorError("Suggestion not found.")
 
     entity = suggestion.detail.get("entity")
-    if entity == "food":
+    if suggestion.kind == "restructure_recipe":
+        result = _apply_restructure(job, suggestion)
+    elif entity == "food":
         result = tools_ingredients.apply_suggestion(job_id, suggestion_id)
     elif entity == "unit":
         result = tools_units.apply_suggestion(job_id, suggestion_id)
