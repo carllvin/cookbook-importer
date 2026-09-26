@@ -644,15 +644,21 @@ _TOOL_APPLY = {
 }
 
 
-def _start_tool_job(tool: str):
+def _start_tool_job(tool: str, meta: dict | None = None):
     job = tool_jobs.create_tool_job(tool)
+    if meta:
+        job.meta.update(meta)
+        tool_jobs.save_tool_job(job)
     threading.Thread(target=_TOOL_SCANS[tool], args=(job.id,), daemon=True).start()
     return {"job_id": job.id}
 
 
 @app.post("/api/tools/ingredients/review")
-async def start_ingredients_review():
-    return _start_tool_job("ingredients_review")
+async def start_ingredients_review(body: dict | None = Body(None)):
+    """Optional body {"focus": "duplicates"}: only the likely duplicates
+    listed in the health overview instead of every entry."""
+    focus = (body or {}).get("focus")
+    return _start_tool_job("ingredients_review", {"focus": focus} if focus == "duplicates" else None)
 
 
 @app.post("/api/tools/ingredients/enrich")
@@ -686,8 +692,11 @@ async def start_tags_suggest_more():
 
 
 @app.post("/api/tools/units/review")
-async def start_units_review():
-    return _start_tool_job("units_review")
+async def start_units_review(body: dict | None = Body(None)):
+    """Optional body {"focus": "duplicates"}: only the likely duplicates
+    listed in the health overview instead of every entry."""
+    focus = (body or {}).get("focus")
+    return _start_tool_job("units_review", {"focus": focus} if focus == "duplicates" else None)
 
 
 @app.post("/api/tools/recipes/translate")

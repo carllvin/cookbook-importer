@@ -995,11 +995,24 @@ function showArea(area) {
 
 document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => showArea(b.dataset.area)));
 
+const TOOL_TITLE_KEYS = {
+  new_recipes: 'toolNewRecipesTitle',
+  meal_plan: 'toolMealPlanTitle',
+  ingredients_review: 'toolIngredientsReviewTitle',
+  ingredients_enrich: 'toolIngredientsEnrichTitle',
+  conversions: 'toolConversionsTitle',
+  units_review: 'toolUnitsTitle',
+  tags_cleanup: 'toolTagsCleanupTitle',
+  tags_simplify: 'toolTagsCleanupTitle',
+  tags_translate: 'toolTagsCleanupTitle',
+  tags_season: 'toolTagsSeasonTitle',
+  tags_suggest_more: 'toolTagsSuggestMoreTitle',
+  recipes_translate: 'toolRecipesTranslateTitle',
+  recipes_restructure: 'toolRecipesRestructureTitle',
+};
+
 function toolTitle(tool) {
-  if (tool === 'new_recipes') return t('toolNewRecipesTitle');
-  if (tool === 'meal_plan') return t('toolMealPlanTitle');
-  const btn = document.querySelector(`.tool-start-btn[data-tool="${tool}"]`);
-  return btn ? btn.closest('.tool-card').querySelector('h3').textContent : tool;
+  return TOOL_TITLE_KEYS[tool] ? t(TOOL_TITLE_KEYS[tool]) : tool;
 }
 
 function shortWhen(epochSeconds) {
@@ -1205,15 +1218,17 @@ async function loadUsage() {
   }
 }
 
-// metric -> the tool that fixes it
+// metric -> the tool that fixes it (endpoint + optional request body)
 const HEALTH_METRICS = [
-  { key: 'foods_without_nutrition', tool: 'ingredients_enrich' },
-  { key: 'foods_without_category', tool: 'ingredients_enrich' },
-  { key: 'missing_conversions', tool: 'conversions' },
-  { key: 'recipes_not_translated', tool: 'recipes_translate' },
-  { key: 'recipes_need_restructure', tool: 'recipes_restructure' },
-  { key: 'recipes_without_season', tool: 'tags_season' },
-  { key: 'recipes_few_tags', tool: 'tags_suggest_more' },
+  { key: 'foods_duplicates', tool: 'ingredients_review', endpoint: '/api/tools/ingredients/review', body: { focus: 'duplicates' } },
+  { key: 'foods_without_nutrition', tool: 'ingredients_enrich', endpoint: '/api/tools/ingredients/enrich' },
+  { key: 'foods_without_category', tool: 'ingredients_enrich', endpoint: '/api/tools/ingredients/enrich' },
+  { key: 'missing_conversions', tool: 'conversions', endpoint: '/api/tools/conversions' },
+  { key: 'units_duplicates', tool: 'units_review', endpoint: '/api/tools/units/review', body: { focus: 'duplicates' } },
+  { key: 'recipes_not_translated', tool: 'recipes_translate', endpoint: '/api/tools/recipes/translate' },
+  { key: 'recipes_need_restructure', tool: 'recipes_restructure', endpoint: '/api/tools/recipes/restructure' },
+  { key: 'recipes_without_season', tool: 'tags_season', endpoint: '/api/tools/tags/season' },
+  { key: 'recipes_few_tags', tool: 'tags_suggest_more', endpoint: '/api/tools/tags/suggest-more' },
 ];
 
 const healthState = { open: null, data: null };
@@ -1234,14 +1249,14 @@ function renderHealth(data) {
       <div class="health-label">${t('health_' + m.key)}</div>
       ${ignoredCount ? `<div class="health-ignored-count">${tf('healthIgnoredCount', { n: ignoredCount })}</div>` : ''}
       <div class="health-tile-actions">
-        ${value ? `<button class="btn secondary health-fix" type="button" data-tool="${m.tool}">${t('healthFix')}</button>` : ''}
+        ${value ? `<button class="btn secondary health-fix" type="button" data-metric="${m.key}">${t('healthFix')}</button>` : ''}
         ${value || ignoredCount ? `<button class="btn secondary health-entries" type="button" data-metric="${m.key}">${t('healthEntries')}</button>` : ''}
       </div>
     </div>`;
   }).join('');
   el('health-grid').querySelectorAll('.health-fix').forEach((b) => b.addEventListener('click', () => {
-    const start = document.querySelector(`.tool-start-btn[data-tool="${b.dataset.tool}"]`);
-    startTool(start.dataset.endpoint, toolTitle(b.dataset.tool));
+    const m = HEALTH_METRICS.find((x) => x.key === b.dataset.metric);
+    startTool(m.endpoint, toolTitle(m.tool), m.body);
   }));
   el('health-grid').querySelectorAll('.health-entries').forEach((b) => b.addEventListener('click', () => {
     if (healthState.open === b.dataset.metric) closeHealthDetail();
@@ -1599,10 +1614,7 @@ el('tools-back-btn').addEventListener('click', () => {
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const title = btn.closest('.tool-card').querySelector('h3').textContent;
-    startTool(btn.dataset.endpoint, title);
-  });
+  btn.addEventListener('click', () => startTool(btn.dataset.endpoint, toolTitle(btn.dataset.tool)));
 });
 
 async function startTool(endpoint, title, body) {

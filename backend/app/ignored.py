@@ -4,8 +4,9 @@ no season tag. Stored per health metric as {key: name} in the data volume.
 Ignored entries don't count in the overview and the tools that fix that
 metric don't suggest them any more.
 
-Keys are strings: the food or recipe id, or "<food id>:<unit id>" for a
-missing conversion ("*:<unit id>" for a general one)."""
+Keys are strings: the food or recipe id, "<food id>:<unit id>" for a
+missing conversion ("*:<unit id>" for a general one), or "<id>:<id>" (smaller
+id first) for a pair of likely duplicates that are rightly separate."""
 from __future__ import annotations
 
 import json
@@ -17,6 +18,7 @@ from .config import settings
 METRICS = {
     "foods_without_nutrition", "foods_without_category", "missing_conversions",
     "recipes_not_translated", "recipes_need_restructure", "recipes_without_season", "recipes_few_tags",
+    "foods_duplicates", "units_duplicates",
 }
 
 _lock = threading.Lock()

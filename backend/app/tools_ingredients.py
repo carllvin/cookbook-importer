@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 
-from . import ignored, llm_provider, nutrition_properties, tandoor_client, tool_jobs
+from . import duplicates, ignored, llm_provider, nutrition_properties, tandoor_client, tool_jobs
 from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
@@ -90,12 +90,23 @@ def run_scan(job_id: str) -> None:
 
         with tandoor_client.get_client() as client:
             foods = tandoor_client.fetch_all_items(client, "food")
+            all_foods = foods
+            if job.meta.get("focus") == "duplicates":
+                # Only the likely duplicates from the health overview, each
+                # group kept together in one chunk.
+                by_id = {f["id"]: f for f in foods}
+                groups = duplicates.open_duplicate_ids(
+                    duplicates.food_duplicates(fetch_all_foods_full(client)), "foods_duplicates")
+                chunks = [[by_id[i] for i in chunk if i in by_id]
+                          for chunk in duplicates.pack_groups(groups, CHUNK_SIZE)]
+                foods = [f for chunk in chunks for f in chunk]
+            else:
+                chunks = list(chunked(foods, CHUNK_SIZE))
             job.progress_total = len(foods)
             job.cost_estimate = format_cost_estimate(len(foods), "chunked_review")
             tool_jobs.save_tool_job(job)
 
             all_actions = []
-            chunks = list(chunked(foods, CHUNK_SIZE))
             for i, chunk in enumerate(chunks, 1):
                 if job.cancel_requested:
                     break
@@ -108,15 +119,15 @@ def run_scan(job_id: str) -> None:
                     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Ingredients review chunk %d failed: %s", i, exc)
-                job.progress_current = i * CHUNK_SIZE
+                job.progress_current = min(sum(len(c) for c in chunks[:i]), len(foods))
                 tool_jobs.save_tool_job(job)
 
             # Whether the loop finished naturally or was cancelled partway
             # through, build suggestions from whatever was gathered - a
             # cancelled scan shouldn't throw away chunks that already cost
             # real AI calls and produced valid suggestions.
-            all_actions = resolve_name_collisions(all_actions, foods)
-            by_id = {f["id"]: f for f in foods}
+            all_actions = duplicates.drop_ignored_merges(resolve_name_collisions(all_actions, all_foods), "foods_duplicates")
+            by_id = {f["id"]: f for f in all_foods}
 
             job.suggestions = [
                 ToolSuggestion(id=uuid.uuid4().hex[:10], kind=action["type"], summary=_describe(action, by_id), detail=action)

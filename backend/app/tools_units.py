@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs
+from . import duplicates, llm_provider, tandoor_client, tool_jobs
 from .config import settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, fetch_all_recipes_full, find_recipes_using_unit, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
@@ -90,9 +90,22 @@ def run_scan(job_id: str) -> None:
             job.cost_estimate = format_cost_estimate(len(units), "chunked_review")
             tool_jobs.save_tool_job(job)
             units = _fetch_units_with_plural(client, units)
+            all_units = units
+
+            if job.meta.get("focus") == "duplicates":
+                # Only the likely duplicates from the health overview, each
+                # group kept together in one chunk.
+                by_id = {u["id"]: u for u in units}
+                groups = duplicates.open_duplicate_ids(duplicates.unit_duplicates(units), "units_duplicates")
+                chunks = [[by_id[i] for i in chunk] for chunk in duplicates.pack_groups(groups, 80)]
+                units = [u for chunk in chunks for u in chunk]
+                job.progress_total = len(units)
+                job.cost_estimate = format_cost_estimate(len(units), "chunked_review")
+                tool_jobs.save_tool_job(job)
+            else:
+                chunks = list(chunked(units, 80))
 
             all_actions = []
-            chunks = list(chunked(units, 80))
             for i, chunk in enumerate(chunks, 1):
                 if job.cancel_requested:
                     break
@@ -116,11 +129,11 @@ def run_scan(job_id: str) -> None:
                     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Unit review chunk %d failed: %s", i, exc)
-                job.progress_current = i * 80
+                job.progress_current = min(sum(len(c) for c in chunks[:i]), len(units))
                 tool_jobs.save_tool_job(job)
 
-            all_actions = resolve_name_collisions(all_actions, units)
-            by_id = {u["id"]: u for u in units}
+            all_actions = duplicates.drop_ignored_merges(resolve_name_collisions(all_actions, all_units), "units_duplicates")
+            by_id = {u["id"]: u for u in all_units}
 
             # Drop no-op plurals: if the AI proposed a plural identical to the
             # singular (e.g. "Zucker" -> "Zucker"), there's nothing to set.

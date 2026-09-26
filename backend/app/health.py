@@ -12,7 +12,7 @@ import os
 import threading
 import time
 
-from . import ignored, recipe_restructure, tandoor_client, tools_conversions, tools_ingredients, tools_recipes, tools_tags
+from . import duplicates, ignored, recipe_restructure, tandoor_client, tools_conversions, tools_ingredients, tools_recipes, tools_tags
 from .config import get_language_code, settings
 from .tandoor_helpers import fetch_all_recipes_full
 
@@ -80,6 +80,7 @@ def _compute() -> None:
                 (ing.get("food") or {}).get("id")
                 for r in recipes for step in r.get("steps", []) for ing in step.get("ingredients", [])
             } - {None}
+            units = tools_conversions._fetch_all(client, "unit")
             general, to_estimate = tools_conversions.find_missing(
                 client, tools_conversions.recipe_pairs(recipes), respect_ignored=False)
 
@@ -106,6 +107,8 @@ def _compute() -> None:
             "foods_without_nutrition": food_items(lambda f: not f.get("properties")),
             "foods_without_category": food_items(lambda f: not f.get("supermarket_category")) if categories else [],
             "missing_conversions": conversion_items,
+            "foods_duplicates": [{"key": p["key"], "name": p["name"]} for p in duplicates.food_duplicates(foods.values())],
+            "units_duplicates": [{"key": p["key"], "name": p["name"]} for p in duplicates.unit_duplicates(units)],
             "recipes_not_translated": recipe_items(lambda r: not tools_recipes.already_in_target_language(r, expected)),
             "recipes_need_restructure": recipe_items(lambda r: bool(recipe_restructure.needs_restructure(r))),
             "recipes_without_season": recipe_items(lambda r: not tools_tags.has_season_tag(r)),
