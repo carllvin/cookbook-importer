@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs
+from . import ignored, llm_provider, tandoor_client, tool_jobs
 from .config import settings, get_language_code
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, fetch_all_recipes_full, find_recipes_by_filter, format_cost_estimate, resolve_name_collisions, validate_actions
@@ -346,7 +346,8 @@ def run_season_scan(job_id: str) -> None:
             job.progress_label = "Scanning every recipe's full detail..."
             tool_jobs.save_tool_job(job)
             recipes = fetch_all_recipes_full(client)
-            missing = [r for r in recipes if not has_season_tag(r)]
+            skip = ignored.keys("recipes_without_season")
+            missing = [r for r in recipes if str(r["id"]) not in skip and not has_season_tag(r)]
             job.progress_total = len(missing)
             job.cost_estimate = format_cost_estimate(len(missing), "batched_season")
             tool_jobs.save_tool_job(job)
@@ -552,9 +553,11 @@ def run_suggest_more_scan(job_id: str) -> None:
             food_names = food_name_set(client)
             # Only descriptive tags count - five ingredient tags ("Blumenkohl")
             # still leave a recipe under-tagged.
+            skip = ignored.keys("recipes_few_tags")
             under_tagged = [
                 r for r in recipes
-                if sum(1 for kw in r.get("keywords", []) if kw["name"].strip().casefold() not in food_names) < MIN_TAGS_DEFAULT
+                if str(r["id"]) not in skip
+                and sum(1 for kw in r.get("keywords", []) if kw["name"].strip().casefold() not in food_names) < MIN_TAGS_DEFAULT
             ]
             job.progress_total = len(under_tagged)
             job.cost_estimate = format_cost_estimate(len(under_tagged), "batched_suggest_tags")

@@ -19,7 +19,7 @@ import re
 
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs
+from . import ignored, llm_provider, tandoor_client, tool_jobs
 from .config import settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import fetch_all_recipes_full, format_cost_estimate, minimal_ref
@@ -282,7 +282,9 @@ def run_scan(job_id: str) -> None:
         with tandoor_client.get_client() as client:
             job.progress_label = "Checking every recipe's structure (no AI)..."
             tool_jobs.save_tool_job(job)
-            candidates = [r for r in fetch_all_recipes_full(client) if needs_restructure(r)]
+            skip = ignored.keys("recipes_need_restructure")
+            candidates = [r for r in fetch_all_recipes_full(client)
+                          if str(r["id"]) not in skip and needs_restructure(r)]
         job.progress_total = len(candidates)
         job.cost_estimate = format_cost_estimate(len(candidates), "per_recipe_translate")
         tool_jobs.save_tool_job(job)

@@ -4,8 +4,8 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, nutrition_properties, tandoor_client, tool_jobs
-from .config import settings
+from . import duplicates, ignored, llm_provider, nutrition_properties, tandoor_client, tool_jobs
+from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
 
@@ -90,12 +90,23 @@ def run_scan(job_id: str) -> None:
 
         with tandoor_client.get_client() as client:
             foods = tandoor_client.fetch_all_items(client, "food")
+            all_foods = foods
+            if job.meta.get("focus") == "duplicates":
+                # Only the likely duplicates from the health overview, each
+                # group kept together in one chunk.
+                by_id = {f["id"]: f for f in foods}
+                groups = duplicates.open_duplicate_ids(
+                    duplicates.food_duplicates(fetch_all_foods_full(client)), "foods_duplicates")
+                chunks = [[by_id[i] for i in chunk if i in by_id]
+                          for chunk in duplicates.pack_groups(groups, CHUNK_SIZE)]
+                foods = [f for chunk in chunks for f in chunk]
+            else:
+                chunks = list(chunked(foods, CHUNK_SIZE))
             job.progress_total = len(foods)
             job.cost_estimate = format_cost_estimate(len(foods), "chunked_review")
             tool_jobs.save_tool_job(job)
 
             all_actions = []
-            chunks = list(chunked(foods, CHUNK_SIZE))
             for i, chunk in enumerate(chunks, 1):
                 if job.cancel_requested:
                     break
@@ -108,15 +119,15 @@ def run_scan(job_id: str) -> None:
                     job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Ingredients review chunk %d failed: %s", i, exc)
-                job.progress_current = i * CHUNK_SIZE
+                job.progress_current = min(sum(len(c) for c in chunks[:i]), len(foods))
                 tool_jobs.save_tool_job(job)
 
             # Whether the loop finished naturally or was cancelled partway
             # through, build suggestions from whatever was gathered - a
             # cancelled scan shouldn't throw away chunks that already cost
             # real AI calls and produced valid suggestions.
-            all_actions = resolve_name_collisions(all_actions, foods)
-            by_id = {f["id"]: f for f in foods}
+            all_actions = duplicates.drop_ignored_merges(resolve_name_collisions(all_actions, all_foods), "foods_duplicates")
+            by_id = {f["id"]: f for f in all_foods}
 
             job.suggestions = [
                 ToolSuggestion(id=uuid.uuid4().hex[:10], kind=action["type"], summary=_describe(action, by_id), detail=action)
@@ -232,9 +243,16 @@ object {"categories": [{"id": integer, "name": string}, ...], "ingredients":
 
 For every ingredient, answer:
 - "plural_name" (only if needs_plural): the plural of the name in
-  {language}, e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier". Use null if the
-  plural is spelled exactly like the singular (e.g. "Zucker", "Messer") or
-  if the ingredient isn't normally counted (e.g. "Mehl", "Salz", "Milch").
+  {language} - but ONLY for things a recipe counts in pieces ("2 Tomaten",
+  "3 Eier", "2 rote Zwiebeln", "4 Knoblauchzehen", "2 Hähnchenbrustfilets"),
+  e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier", "Rote Zwiebel" -> "Rote
+  Zwiebeln". Use null for everything measured by weight, volume or spoons
+  instead of counted: pastes, sauces, oils, vinegars, spices, dried herbs,
+  flour, sugar, salt, liquids, dairy, grains, minced meat, jams, powders
+  (e.g. "Koreanische Chilipaste", "Sojasauce", "Olivenöl", "Mehl",
+  "Zimt", "Milch", "Reis", "Hackfleisch"). Also null if the plural is
+  spelled exactly like the singular (e.g. "Zucker", "Messer"). When in
+  doubt, use null - a missing plural is harmless, a nonsensical one isn't.
 - "nutrition" (only if needs_nutrition): rough typical values for the raw /
   commonly used ingredient, as {"basis": "g" or "ml", "energy_kcal": number,
   "protein_g": number, "fat_g": number, "carbs_g": number} per 100 g - or
@@ -283,6 +301,37 @@ def _same_word(a, b):
     return (a or "").strip().lower() == (b or "").strip().lower()
 
 
+# German word endings of ingredients that are measured, never counted - a
+# safety net for plurals the AI still suggests ("Chilipaste" -> "Chilipasten").
+# Checked against the last word of the name, so "Koreanische Chilipaste" and
+# "Sesamöl" match but "Wassermelone" doesn't.
+_GERMAN_MASS_ENDINGS = (
+    "paste", "pasta", "soße", "sosse", "sauce", "öl", "essig", "mehl", "grieß", "gries",
+    "stärke", "pulver", "salz", "zucker", "sirup", "honig", "dicksaft", "milch", "sahne",
+    "rahm", "schmand", "joghurt", "jogurt", "quark", "butter", "schmalz", "margarine",
+    "creme", "crème", "brühe", "fond", "saft", "wein", "bier", "likör", "wasser",
+    "senf", "ketchup", "mayonnaise", "pesto", "dressing", "marmelade", "konfitüre",
+    "gelee", "mus", "püree", "mark", "extrakt", "aroma", "hefe", "gelatine", "natron",
+    "reis", "hack", "hackfleisch", "flocken", "gewürz", "zimt", "pfeffer", "curry",
+    "kurkuma", "muskat", "oregano", "thymian", "rosmarin", "basilikum", "petersilie",
+    "schnittlauch", "dill", "kakao", "kaffee", "tee", "schokolade", "kuvertüre",
+    "sesam", "mohn", "couscous", "bulgur", "quinoa", "polenta", "spinat", "rucola",
+)
+
+
+def plausible_plural(name, plural) -> str:
+    """The suggested plural, or "" if it adds nothing (same as the singular)
+    or makes no sense (German mass/uncountable ingredient)."""
+    plural = plural.strip() if isinstance(plural, str) else ""
+    if not plural or _same_word(plural, name):
+        return ""
+    if get_language_code(settings.output_language) == "de":
+        last = (name or "").strip().split()[-1].lower() if (name or "").strip() else ""
+        if last.endswith(_GERMAN_MASS_ENDINGS):
+            return ""
+    return plural
+
+
 def _clean_nutrition(nutrition):
     if not isinstance(nutrition, dict):
         return None
@@ -312,13 +361,18 @@ def _describe_enrich(name, plural, nutrition, category):
 def enrich_targets(foods, categories, nutrition_available=True) -> list[dict]:
     """The subset of full food dicts that miss a plural, nutrition (only
     asked when matching property types exist in Tandoor), or (when any
-    categories exist to pick from) a supermarket category."""
+    categories exist to pick from) a supermarket category. Nutrition and
+    category are not asked for foods the user ignored for them in the
+    health overview."""
+    skip_nutrition = ignored.keys("foods_without_nutrition")
+    skip_category = ignored.keys("foods_without_category")
     targets = []
     for food in foods:
         needs_plural = not (food.get("plural_name") or "").strip()
-        needs_nutrition = nutrition_available and not food.get("properties")
+        needs_nutrition = nutrition_available and not food.get("properties") and str(food["id"]) not in skip_nutrition
         # No existing categories -> nothing to pick from, so never ask.
-        needs_category = bool(categories) and not food.get("supermarket_category")
+        needs_category = (bool(categories) and not food.get("supermarket_category")
+                          and str(food["id"]) not in skip_category)
         if needs_plural or needs_nutrition or needs_category:
             targets.append({"id": food["id"], "name": food["name"], "needs_plural": needs_plural,
                             "needs_nutrition": needs_nutrition, "needs_category": needs_category})
@@ -361,10 +415,7 @@ def enrich_suggestions(job, targets, categories) -> list[ToolSuggestion]:
             target = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
             if target is None:
                 continue
-            plural = answer.get("plural_name") if target["needs_plural"] else None
-            plural = plural.strip() if isinstance(plural, str) else ""
-            if _same_word(plural, target["name"]):
-                plural = ""  # plural == singular: nothing to add
+            plural = plausible_plural(target["name"], answer.get("plural_name") if target["needs_plural"] else None)
             nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
             # Only accept ids of categories that actually exist.
             category = categories_by_id.get(answer.get("category_id")) if target["needs_category"] else None

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import health, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import health, ignored, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -322,6 +322,31 @@ async def health_refresh():
     return health.cached()
 
 
+@app.get("/api/health/items/{metric}")
+async def health_items(metric: str):
+    try:
+        return health.items(metric)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post("/api/health/ignore")
+async def health_ignore(body: dict = Body(...)):
+    """{"metric": ..., "items": [{"key", "name"}]} - ignore these entries."""
+    try:
+        ignored.add(body.get("metric", ""), body.get("items") or [])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return health.cached()
+
+
+@app.post("/api/health/unignore")
+async def health_unignore(body: dict = Body(...)):
+    """{"metric": ..., "keys": [...]} - count these entries again."""
+    ignored.remove(body.get("metric", ""), body.get("keys") or [])
+    return health.cached()
+
+
 @app.get("/api/inbox/count")
 async def inbox_count():
     count = sum(
@@ -619,15 +644,21 @@ _TOOL_APPLY = {
 }
 
 
-def _start_tool_job(tool: str):
+def _start_tool_job(tool: str, meta: dict | None = None):
     job = tool_jobs.create_tool_job(tool)
+    if meta:
+        job.meta.update(meta)
+        tool_jobs.save_tool_job(job)
     threading.Thread(target=_TOOL_SCANS[tool], args=(job.id,), daemon=True).start()
     return {"job_id": job.id}
 
 
 @app.post("/api/tools/ingredients/review")
-async def start_ingredients_review():
-    return _start_tool_job("ingredients_review")
+async def start_ingredients_review(body: dict | None = Body(None)):
+    """Optional body {"focus": "duplicates"}: only the likely duplicates
+    listed in the health overview instead of every entry."""
+    focus = (body or {}).get("focus")
+    return _start_tool_job("ingredients_review", {"focus": focus} if focus == "duplicates" else None)
 
 
 @app.post("/api/tools/ingredients/enrich")
@@ -661,8 +692,11 @@ async def start_tags_suggest_more():
 
 
 @app.post("/api/tools/units/review")
-async def start_units_review():
-    return _start_tool_job("units_review")
+async def start_units_review(body: dict | None = Body(None)):
+    """Optional body {"focus": "duplicates"}: only the likely duplicates
+    listed in the health overview instead of every entry."""
+    focus = (body or {}).get("focus")
+    return _start_tool_job("units_review", {"focus": focus} if focus == "duplicates" else None)
 
 
 @app.post("/api/tools/recipes/translate")

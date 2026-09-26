@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx  # noqa: E402
 
-from app import llm_provider, nutrition_properties, tandoor_client  # noqa: E402
+from app import llm_provider, nutrition_properties, tandoor_client, tools_ingredients  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.tandoor_client import TandoorError  # noqa: E402
 from scripts._shared import (  # noqa: E402
@@ -249,7 +249,12 @@ integer, "name": string}}, "categories": [{{"id": integer, "name": string}},
 ...], "needs_plural": bool, "needs_category": bool}}.
 
 If needs_plural is true, give the plural form of the food's name in
-{language} (e.g. "Tomate" -> "Tomaten"). If needs_category is true, pick the
+{language} (e.g. "Tomate" -> "Tomaten") - but ONLY for things a recipe
+counts in pieces (Tomaten, Eier, Zwiebeln, Knoblauchzehen). Use null for
+anything measured by weight, volume or spoons (pastes, sauces, oils,
+spices, flour, liquids, dairy, grains, minced meat - e.g. "Koreanische
+Chilipaste", "Sojasauce", "Olivenöl") and when the plural is spelled like
+the singular. When in doubt, null. If needs_category is true, pick the
 SINGLE best-fitting category id from the given "categories" list; if
 genuinely none of them fit, instead suggest a short, natural new category
 name in {language} (e.g. "Gewürze" for a spice with no spice category yet) -
@@ -356,8 +361,9 @@ def run_metadata(preview_count, apply, assume_yes):
                 continue
 
             payload = {}
-            if needs_plural and result.get("plural_name"):
-                payload["plural_name"] = result["plural_name"]
+            plural = tools_ingredients.plausible_plural(food["name"], result.get("plural_name")) if needs_plural else ""
+            if plural:
+                payload["plural_name"] = plural
 
             if needs_category and result.get("category_id"):
                 payload["category"] = {"id": result["category_id"]}

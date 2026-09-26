@@ -15,10 +15,12 @@ The web UI has four areas:
   plan), grouped by kind.
 - **📅 Plan** – a weekly meal plan from your own recipes, added to Tandoor's
   meal plan and shopping list.
-- **🔧 Maintain** – tools for cleaning up an existing collection (merging
-  duplicate ingredients/units/tags, translating, nutrition, conversions,
-  tags, recipe structure), a health overview of what's left to do, and the
-  AI token usage of the last 30 days. A few destructive operations are
+- **🔧 Maintain** – a health overview of the collection (likely duplicate
+  ingredients/units, missing nutrition/categories/conversions, untranslated
+  or unstructured recipes, missing season/tags): each tile starts the tool
+  that fixes it, and single entries can be ignored. Tools without a count
+  (full ingredient/unit review, tag translate & simplify) are under "More
+  tools". Plus the AI token usage of the last 30 days. A few destructive operations are
   standalone scripts that intentionally require a terminal - see
   [`backend/scripts/`](backend/scripts/).
 
