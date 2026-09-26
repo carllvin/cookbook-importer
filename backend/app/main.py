@@ -27,6 +27,19 @@ log = logging.getLogger("tandoor-helper")
 
 app = FastAPI(title="Tandoor Helper")
 
+
+@app.middleware("http")
+async def revalidate_static_files(request, call_next):
+    """The frontend (index.html, app.js, i18n.js, style.css) must always be
+    revalidated: without this, a browser may keep an old i18n.js next to a
+    new index.html after an update and show raw keys like
+    'toolRecipesRestructureTitle'. StaticFiles answers revalidations with
+    304 Not Modified (ETag), so this costs almost nothing."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 DUPLICATE_SIMILARITY_THRESHOLD = 0.82  # titles scoring at or above this (0-1) count as "similar"
