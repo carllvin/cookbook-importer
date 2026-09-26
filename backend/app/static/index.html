@@ -135,6 +135,13 @@
         <div class="dropzone-hint" data-i18n="dropzoneHint">One PDF or EPUB, or several photos of pages (JPEG, PNG, HEIC)</div>
         <input id="file-input" type="file" accept=".pdf,.epub,.jpg,.jpeg,.png,.heic,.heif" multiple />
       </label>
+      <form id="url-form" class="url-form">
+        <span class="url-form-or" data-i18n="urlImportOr">or import a single recipe from a website</span>
+        <div class="url-form-row">
+          <input id="url-input" type="url" inputmode="url" placeholder="https://…" required />
+          <button class="btn" type="submit" data-i18n="urlImportBtn">Import</button>
+        </div>
+      </form>
       <div id="upload-error" class="error-banner hidden" style="margin-top:18px;"></div>
     </div>
 

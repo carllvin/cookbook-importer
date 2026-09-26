@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.responses import FileResponse, JSONResponse
@@ -20,6 +21,7 @@ from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
 from .image_processor import SUPPORTED_IMAGE_EXTENSIONS, process_images
 from .pdf_processor import process_pdf
+from .url_processor import UrlImportError, process_url, validate_url
 from .schemas import ExtractedRecipe
 
 logging.basicConfig(level=logging.INFO)
@@ -126,6 +128,10 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
             job.progress_label = "Running OCR on uploaded photo(s) …"
             jobs.save_job(job)
             result = process_images(source_paths, images_dir)
+        elif doc_type == "url":
+            job.progress_label = "Loading the recipe page …"
+            jobs.save_job(job)
+            result = process_url(source_paths[0], images_dir)
         else:
             raise ValueError(f"Unknown document type: {doc_type}")
 
@@ -157,14 +163,20 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
         job.token_usage.add(usage)
         jobs.match_images_to_recipes(job)
 
-        job.progress_label = "Determining cookbook title …"
-        jobs.save_job(job)
-        guess, title_usage = guess_cookbook_title(
-            result["pages"], job.filename, metadata_title=result.get("metadata_title", "")
-        )
-        job.token_usage.add(title_usage)
-        job.suggested_cookbook_name = guess
-        job.cookbook_name = guess
+        if doc_type == "url":
+            # A single web recipe doesn't belong to a cookbook by default -
+            # the name field stays empty (the user can still type one).
+            job.suggested_cookbook_name = None
+            job.cookbook_name = None
+        else:
+            job.progress_label = "Determining cookbook title …"
+            jobs.save_job(job)
+            guess, title_usage = guess_cookbook_title(
+                result["pages"], job.filename, metadata_title=result.get("metadata_title", "")
+            )
+            job.token_usage.add(title_usage)
+            job.suggested_cookbook_name = guess
+            job.cookbook_name = guess
 
         job.progress_label = "Checking for duplicates already in Tandoor …"
         jobs.save_job(job)
@@ -236,6 +248,21 @@ async def upload_files(files: list[UploadFile] = File(...)):
     jobs.save_job(job)
     threading.Thread(target=_run_extraction, args=(job.id, source_paths, doc_type, settings.force_ocr), daemon=True).start()
 
+    return {"job_id": job.id}
+
+
+@app.post("/api/import-url")
+async def import_url(body: dict = Body(...)):
+    """Imports a single recipe from a web page - same extraction, review
+    and import flow as an uploaded document (see url_processor)."""
+    try:
+        url = validate_url(body.get("url", ""))
+    except UrlImportError as exc:
+        raise HTTPException(400, str(exc))
+    job = jobs.create_job(urlparse(url).netloc or url)
+    os.makedirs(_job_dir(job.id), exist_ok=True)
+    jobs.save_job(job)
+    threading.Thread(target=_run_extraction, args=(job.id, [url], "url"), daemon=True).start()
     return {"job_id": job.id}
 
 

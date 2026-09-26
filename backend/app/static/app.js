@@ -204,6 +204,40 @@ async function uploadFiles(files) {
   }
 }
 
+// Single recipe from a web page: same processing / review / import flow.
+el('url-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = el('url-input').value.trim();
+  if (!url) return;
+  el('upload-error').classList.add('hidden');
+  requestNotificationPermission();
+  el('upload-screen').classList.add('hidden');
+  el('processing-screen').classList.remove('hidden');
+  el('progress-track').classList.add('hidden');
+  el('usage-badge').classList.add('hidden');
+  el('processing-text').textContent = t('urlImportLoading');
+  try {
+    const res = await fetch('/api/import-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `${t('uploadFailedPrefix')} (${res.status})`);
+    }
+    const data = await res.json();
+    state.jobId = data.job_id;
+    setJobUrl(data.job_id);
+    el('url-input').value = '';
+    pollJob();
+  } catch (err) {
+    el('processing-screen').classList.add('hidden');
+    el('upload-screen').classList.remove('hidden');
+    showUploadError(err.message);
+  }
+});
+
 function showUploadError(msg) {
   const box = el('upload-error');
   box.textContent = msg;

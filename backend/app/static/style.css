@@ -786,3 +786,11 @@ a { color: inherit; }
 
 .tools-open-runs { margin-bottom: 16px; }
 .tools-open-runs h3 { margin: 0 0 8px; font-size: 1rem; }
+
+.url-form { width: min(560px, 90vw); margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.url-form-or { font-size: 0.85rem; color: #8f9689; text-align: center; }
+.url-form-row { display: flex; gap: 8px; }
+.url-form-row input {
+  flex: 1; min-width: 0; background: rgba(239,233,218,0.05); border: 1px solid #2a2f2a;
+  border-radius: var(--radius); color: var(--paper); padding: 10px 12px; font-size: 0.95rem;
+}
