@@ -7,15 +7,22 @@ restructure_plan() asks the AI once per such recipe to split the method
 into sensible steps (keeping the wording), assign each ingredient to the
 step that first uses it, and fill in missing servings/times. The result is
 a suggestion with a before/after preview - applied only after review,
-because unlike a translation it changes the recipe's structure."""
+because unlike a translation it changes the recipe's structure.
+
+Used by the new-recipes workflow and, for the whole collection, by the
+"Recipes: revise structure" tool (run_scan / apply_suggestion below)."""
 from __future__ import annotations
 
 import json
 import logging
 import re
 
-from . import llm_provider
-from .tandoor_helpers import minimal_ref
+import uuid
+
+from . import llm_provider, tandoor_client, tool_jobs
+from .config import settings
+from .schemas import ToolSuggestion
+from .tandoor_helpers import fetch_all_recipes_full, format_cost_estimate, minimal_ref
 
 log = logging.getLogger("tandoor-helper")
 
@@ -218,3 +225,95 @@ def same_ingredients(recipe, plan) -> bool:
     """The plan still fits: same ingredient rows as when it was made."""
     current = sorted(i.get("id") or 0 for i in _ingredients(recipe))
     return None not in plan["keys"].values() and current == sorted(plan["keys"].values())
+
+
+def apply_plan(job, suggestion) -> ToolSuggestion:
+    """Applies a revision suggestion against a FRESH copy of the recipe
+    (ingredient merges may have run since the scan)."""
+    if suggestion.status != "pending":
+        return suggestion
+    try:
+        with tandoor_client.get_client() as client:
+            recipe_id = suggestion.detail["recipe_id"]
+            resp = client.get(f"/recipe/{recipe_id}/")
+            resp.raise_for_status()
+            recipe = resp.json()
+            plan = suggestion.detail["plan"]
+            if not same_ingredients(recipe, plan):
+                raise tandoor_client.TandoorError("The recipe's ingredients changed since the scan - rescan to revise it.")
+            resp = client.patch(f"/recipe/{recipe_id}/", json=build_payload(recipe, plan))
+            if resp.status_code not in (200, 201):
+                raise tandoor_client.TandoorError(f"{resp.status_code} {resp.text[:300]}")
+        suggestion.status = "applied"
+    except Exception as exc:  # noqa: BLE001
+        suggestion.status = "error"
+        suggestion.error = str(exc)
+    finally:
+        tool_jobs.save_tool_job(job)
+    return suggestion
+
+
+def plan_suggestion(job, recipe) -> ToolSuggestion | None:
+    """AI revision for one recipe as a suggestion (None if it failed)."""
+    try:
+        plan, usage = restructure_plan(recipe, settings.output_language)
+        job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+        job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Revision of recipe %s failed: %s", recipe.get("id"), exc)
+        return None
+    summary, preview = describe_plan(recipe, plan)
+    return ToolSuggestion(id=uuid.uuid4().hex[:10], kind="restructure_recipe", summary=summary, preview=preview,
+                          detail={"recipe_id": recipe["id"], "plan": plan})
+
+
+def run_scan(job_id: str) -> None:
+    """The whole collection: checks every recipe locally (no AI), then one
+    AI call per recipe that needs a revision."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        return
+    try:
+        if not llm_provider.is_configured():
+            job.status = "error"
+            job.error = llm_provider.missing_key_hint()
+            tool_jobs.save_tool_job(job)
+            return
+        with tandoor_client.get_client() as client:
+            job.progress_label = "Checking every recipe's structure (no AI)..."
+            tool_jobs.save_tool_job(job)
+            candidates = [r for r in fetch_all_recipes_full(client) if needs_restructure(r)]
+        job.progress_total = len(candidates)
+        job.cost_estimate = format_cost_estimate(len(candidates), "per_recipe_translate")
+        tool_jobs.save_tool_job(job)
+
+        suggestions = []
+        for i, recipe in enumerate(candidates, 1):
+            if job.cancel_requested:
+                break
+            job.progress_current = i
+            job.progress_label = f"Revising recipe {i}/{len(candidates)}: {recipe.get('name', '')!r}..."
+            tool_jobs.save_tool_job(job)
+            suggestion = plan_suggestion(job, recipe)
+            if suggestion:
+                suggestions.append(suggestion)
+
+        job.suggestions = suggestions
+        job.status = "cancelled" if job.cancel_requested else "ready"
+        job.progress_label = None
+        tool_jobs.save_tool_job(job)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Recipe revision scan failed for job %s", job_id)
+        job.status = "error"
+        job.error = str(exc)
+        tool_jobs.save_tool_job(job)
+
+
+def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None:
+        raise tandoor_client.TandoorError("Job not found.")
+    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
+    if suggestion is None:
+        raise tandoor_client.TandoorError("Suggestion not found.")
+    return apply_plan(job, suggestion)
