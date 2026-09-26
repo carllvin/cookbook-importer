@@ -5,12 +5,22 @@ individual recipes — including images, ingredients, times, and tags — review
 and adjust them in a web UI, and import the selected ones into
 [Tandoor](https://tandoor.dev/) via its API.
 
-Beyond importing, Tandoor Helper also includes maintenance tools (in the web
-UI under **🔧 Tools**, and as standalone scripts for a few destructive
-operations that intentionally require a terminal) for cleaning up an existing
-Tandoor collection: merging duplicate ingredients/units/tags, translating
-them into your target language, filling in missing metadata, and more - see
-[`backend/scripts/`](backend/scripts/) for the full list.
+The web UI has four areas:
+
+- **📥 Import** – a cookbook (PDF/EPUB), photos of pages, or a single recipe
+  from a web page; reviewed before it goes into Tandoor, and post-processed
+  automatically afterwards.
+- **✅ Review** – one inbox for every suggestion waiting for approval
+  (merges, ingredient details, conversions, recipe revisions, tags, meal
+  plan), grouped by kind.
+- **📅 Plan** – a weekly meal plan from your own recipes, added to Tandoor's
+  meal plan and shopping list.
+- **🔧 Maintain** – tools for cleaning up an existing collection (merging
+  duplicate ingredients/units/tags, translating, nutrition, conversions,
+  tags, recipe structure), a health overview of what's left to do, and the
+  AI token usage of the last 30 days. A few destructive operations are
+  standalone scripts that intentionally require a terminal - see
+  [`backend/scripts/`](backend/scripts/).
 
 <p align="center">
   <img src="screenshots/main_page.png" alt="Main page" width="85%">
@@ -106,7 +116,7 @@ keeping an eye on cost.
 | `REUSE_EXISTING_TAGS` | `true` | Fetches existing Tandoor tags and asks the AI to prefer reusing them |
 | `CUSTOM_INSTRUCTIONS` | *(empty)* | Free-text instructions appended to the extraction prompt — see [Custom instructions](#custom-instructions) below |
 | `JOB_RETENTION_HOURS` | `48` | Deletes jobs (and their uploaded PDF/images) from disk after this many hours |
-| `AUTO_PROCESS_INTERVAL_HOURS` | `0` (off) | Runs **Process new recipes** automatically every N hours: new recipes are translated right away, all other suggestions wait under 🔧 Tools for review. Costs AI tokens only when there are new recipes |
+| `AUTO_PROCESS_INTERVAL_HOURS` | `0` (off) | Runs **Process new recipes** automatically every N hours: new recipes are translated right away, all other suggestions wait under ✅ Review. Costs AI tokens only when there are new recipes |
 | `MAX_UPLOAD_MB` | `100` | Maximum PDF upload size |
 
 ### Switching AI providers

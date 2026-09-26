@@ -947,8 +947,8 @@ function resetToUpload() {
   el('action-bar').classList.add('hidden');
   el('processing-screen').classList.add('hidden');
   el('usage-badge').classList.add('hidden');
-  el('tools-screen').classList.add('hidden');
   el('upload-screen').classList.remove('hidden');
+  showArea('import');
 }
 
 el('brand-link').addEventListener('click', goHome);
@@ -960,33 +960,300 @@ el('brand-link').addEventListener('keydown', (e) => {
 });
 
 function goHome() {
-  const alreadyHome = !el('upload-screen').classList.contains('hidden');
+  const alreadyHome = currentArea === 'import' && !el('upload-screen').classList.contains('hidden');
   if (alreadyHome) return;
-
+  if (currentArea !== 'import') {
+    showArea('import');  // back to whatever the import area showed (upload or review)
+    return;
+  }
   if (state.jobId) {
     if (!confirm(t('confirmGoHome'))) return;
   }
   el('success-modal').classList.add('hidden');
-  el('tools-screen').classList.add('hidden');
   resetToUpload();
 }
+
+// ---------- Areas (Import / Review / Plan / Maintain) ----------
+
+const AREAS = { import: 'area-import', inbox: 'area-inbox', plan: 'area-plan', maintain: 'tools-screen' };
+let currentArea = 'import';
+
+function showArea(area) {
+  currentArea = area;
+  Object.entries(AREAS).forEach(([name, id]) => el(id).classList.toggle('hidden', name !== area));
+  document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.area === area));
+  if (area === 'import') loadRecentImports();
+  if (area === 'inbox') loadInbox();
+  if (area === 'plan') openPlanArea();
+  if (area === 'maintain') {
+    loadNewRecipesStatus();
+    loadUsage();
+    loadHealth();
+  }
+  window.scrollTo(0, 0);
+}
+
+document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => showArea(b.dataset.area)));
+
+function toolTitle(tool) {
+  if (tool === 'new_recipes') return t('toolNewRecipesTitle');
+  if (tool === 'meal_plan') return t('toolMealPlanTitle');
+  const btn = document.querySelector(`.tool-start-btn[data-tool="${tool}"]`);
+  return btn ? btn.closest('.tool-card').querySelector('h3').textContent : tool;
+}
+
+function shortWhen(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+// ---------- Recent imports (import area) ----------
+
+async function loadRecentImports() {
+  const box = el('recent-imports');
+  try {
+    const items = (await (await fetch('/api/jobs')).json()).filter((j) => j.id !== state.jobId);
+    if (!items.length) { box.classList.add('hidden'); return; }
+    el('recent-imports-list').innerHTML = items.map((j) => {
+      const status = j.status === 'processing' ? t('recentImportRunning')
+        : j.status === 'error' ? t('recentImportError')
+        : tf('recentImportLine', { recipes: j.recipes, imported: j.imported });
+      return `<div class="new-recipes-open-job"><span><strong>${escapeHtml(j.filename)}</strong> · ${escapeHtml(status)} · ${escapeHtml(shortWhen(j.created_at))}</span>
+        <button class="btn secondary" type="button" data-job-id="${j.id}">${t('toolNewRecipesOpenJob')}</button></div>`;
+    }).join('');
+    el('recent-imports-list').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => openImportJob(b.dataset.jobId)));
+    box.classList.remove('hidden');
+  } catch (e) {
+    box.classList.add('hidden');
+  }
+}
+
+async function openImportJob(jobId) {
+  clearTimeout(state.pollTimer);
+  setJobUrl(jobId);
+  el('upload-screen').classList.add('hidden');
+  await tryRestoreJobFromUrl();
+  if (state.jobId !== jobId) el('upload-screen').classList.remove('hidden');  // job was gone
+}
+
+// ---------- Review inbox ----------
+
+// Order matters: merges first, so ingredient details and conversions are
+// applied to the entries that remain.
+const INBOX_GROUPS = [
+  { key: 'merges', icon: '🔀', match: (i) => i.entity || i.kind === 'merge' || i.kind === 'rename' },
+  { key: 'details', icon: '🥗', match: (i) => i.kind === 'enrich' || i.kind === 'set_plural' },
+  { key: 'conversions', icon: '⚖️', match: (i) => i.kind === 'conversion' },
+  { key: 'recipes', icon: '🧩', match: (i) => i.kind === 'restructure_recipe' || i.kind === 'translate_recipe' },
+  { key: 'tags', icon: '🏷️', match: (i) => i.kind === 'season' || i.kind === 'suggest_tags' },
+  { key: 'plan', icon: '📅', match: (i) => i.kind === 'meal_plan' },
+  { key: 'other', icon: '•', match: () => true },
+];
+const inboxState = { items: [], selected: new Set(), collapsed: new Set(), busyGroup: null, results: {} };
+
+function itemKey(i) { return `${i.job_id}:${i.id}`; }
+
+async function updateInboxBadge() {
+  try {
+    const data = await (await fetch('/api/inbox/count')).json();
+    const badge = el('inbox-badge');
+    badge.textContent = data.count > 99 ? '99+' : data.count;
+    badge.classList.toggle('hidden', data.count === 0);
+  } catch (e) { /* badge is best-effort */ }
+}
+
+async function loadInbox() {
+  try {
+    const data = await (await fetch('/api/inbox')).json();
+    inboxState.items = data.items;
+    const keys = new Set(data.items.map(itemKey));
+    inboxState.selected.forEach((k) => { if (!keys.has(k)) inboxState.selected.delete(k); });
+    el('inbox-running').innerHTML = data.running.map((r) => `
+      <div class="inbox-running-row"><span class="spinner small"></span>
+        ${escapeHtml(tf('inboxRunning', { tool: r.trigger === 'import' ? t('triggerImport') : toolTitle(r.tool) }))}
+        ${r.label ? `<span class="inbox-source">${escapeHtml(r.label)}</span>` : ''}</div>`).join('');
+    renderInbox();
+    updateInboxBadge();
+    clearTimeout(inboxState.timer);
+    if (data.running.length && currentArea === 'inbox') inboxState.timer = setTimeout(loadInbox, 4000);
+  } catch (e) {
+    el('inbox-groups').innerHTML = `<div class="error-banner">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderInbox() {
+  const groups = INBOX_GROUPS.map((g) => ({ ...g, items: [] }));
+  inboxState.items.forEach((i) => groups.find((g) => g.match(i)).items.push(i));
+  const visible = groups.filter((g) => g.items.length);
+  if (!visible.length) {
+    el('inbox-groups').innerHTML = `<p class="inbox-empty">${t('inboxEmpty')}</p>`;
+    return;
+  }
+  el('inbox-groups').innerHTML = visible.map((g) => {
+    const selected = g.items.filter((i) => inboxState.selected.has(itemKey(i))).length;
+    const busy = inboxState.busyGroup === g.key;
+    const collapsed = inboxState.collapsed.has(g.key);
+    return `
+    <section class="inbox-group" data-group="${g.key}">
+      <div class="inbox-group-head">
+        <button type="button" class="inbox-collapse" data-group="${g.key}">${collapsed ? '▸' : '▾'}</button>
+        <h2>${g.icon} ${t('inboxGroup_' + g.key)} <span class="inbox-count">${g.items.length}</span></h2>
+        <label class="tools-select-all"><input type="checkbox" class="inbox-select-all" data-group="${g.key}"
+          ${selected === g.items.length ? 'checked' : ''} ${busy ? 'disabled' : ''}> <span>${t('toolSelectAll')}</span></label>
+        <span class="tools-bulk-status" id="inbox-status-${g.key}">${escapeHtml(inboxState.results[g.key] || '')}</span>
+        <div class="tools-bulk-actions">
+          <button class="btn secondary inbox-skip" type="button" data-group="${g.key}" ${!selected || busy ? 'disabled' : ''}>${t('toolSkipBtn')} (${selected})</button>
+          <button class="btn inbox-apply" type="button" data-group="${g.key}" ${!selected || busy ? 'disabled' : ''}>${t('toolApplyBtn')} (${selected})</button>
+        </div>
+      </div>
+      ${g.key === 'merges' ? `<p class="inbox-hint">${t('inboxMergesHint')}</p>` : ''}
+      <div class="tools-suggestions-list ${collapsed ? 'hidden' : ''}">
+        ${g.items.map((i) => `
+          <div class="tool-suggestion-row pending" data-key="${itemKey(i)}">
+            <input type="checkbox" class="suggestion-check" ${inboxState.selected.has(itemKey(i)) ? 'checked' : ''} ${busy ? 'disabled' : ''}>
+            <div class="suggestion-text">
+              ${escapeHtml(i.summary)}
+              <div class="inbox-source">${escapeHtml(i.trigger === 'import' ? t('triggerImport') : toolTitle(i.tool))} · ${escapeHtml(shortWhen(i.job_created_at))}</div>
+              ${i.preview ? `<details class="suggestion-preview"><summary>${t('toolShowPreview')}</summary><pre>${escapeHtml(i.preview)}</pre></details>` : ''}
+            </div>
+          </div>`).join('')}
+      </div>
+    </section>`;
+  }).join('');
+
+  const groupItems = (key) => groups.find((g) => g.key === key).items;
+  el('inbox-groups').querySelectorAll('.inbox-collapse').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.group;
+    if (inboxState.collapsed.has(k)) inboxState.collapsed.delete(k); else inboxState.collapsed.add(k);
+    renderInbox();
+  }));
+  el('inbox-groups').querySelectorAll('.inbox-select-all').forEach((box) => box.addEventListener('change', () => {
+    groupItems(box.dataset.group).forEach((i) => {
+      if (box.checked) inboxState.selected.add(itemKey(i)); else inboxState.selected.delete(itemKey(i));
+    });
+    renderInbox();
+  }));
+  el('inbox-groups').querySelectorAll('.tool-suggestion-row').forEach((row) => {
+    const box = row.querySelector('.suggestion-check');
+    const toggle = () => {
+      if (box.checked) inboxState.selected.add(row.dataset.key); else inboxState.selected.delete(row.dataset.key);
+      renderInbox();
+    };
+    box.addEventListener('change', toggle);
+    row.addEventListener('click', (e) => {
+      if (inboxState.busyGroup || e.target === box || e.target.closest('details')) return;
+      box.checked = !box.checked;
+      toggle();
+    });
+  });
+  el('inbox-groups').querySelectorAll('.inbox-apply, .inbox-skip').forEach((b) => b.addEventListener('click', () => {
+    runInboxAction(b.dataset.group, b.classList.contains('inbox-apply') ? 'apply' : 'skip', groupItems(b.dataset.group));
+  }));
+}
+
+async function runInboxAction(groupKey, action, items) {
+  const todo = items.filter((i) => inboxState.selected.has(itemKey(i)));
+  if (!todo.length || inboxState.busyGroup) return;
+  inboxState.busyGroup = groupKey;
+  inboxState.results[groupKey] = '';
+  renderInbox();
+  let failed = 0;
+  for (let n = 0; n < todo.length; n++) {
+    const i = todo[n];
+    const status = el(`inbox-status-${groupKey}`);
+    if (status) status.textContent = tf(action === 'apply' ? 'toolApplyingProgress' : 'toolSkippingProgress', { current: n + 1, total: todo.length });
+    try {
+      const res = await fetch(`/api/tools/jobs/${i.job_id}/suggestions/${i.id}/${action}`, { method: 'POST' });
+      const s = await res.json();
+      if (!res.ok || s.status === 'error') {
+        failed++;
+        const row = document.querySelector(`.tool-suggestion-row[data-key="${itemKey(i)}"]`);
+        if (row) {
+          row.classList.add('error');
+          row.querySelector('.suggestion-text').insertAdjacentHTML('beforeend', `<div class="inbox-error">${escapeHtml(s.error || s.detail || `HTTP ${res.status}`)}</div>`);
+        }
+      } else {
+        const row = document.querySelector(`.tool-suggestion-row[data-key="${itemKey(i)}"]`);
+        if (row) row.classList.add(action === 'apply' ? 'applied' : 'skipped');
+      }
+    } catch (e) {
+      failed++;
+    }
+    inboxState.selected.delete(itemKey(i));
+  }
+  inboxState.busyGroup = null;
+  inboxState.results[groupKey] = failed ? tf('toolBulkFailed', { count: failed }) : '';
+  // Failed items stay pending on the server and reappear - with their error
+  // kept in the status line of the group.
+  await loadInbox();
+}
+
+// ---------- Maintain: AI usage + collection health ----------
+
+async function loadUsage() {
+  try {
+    const data = await (await fetch('/api/usage?days=30')).json();
+    const total = data.total.input_tokens + data.total.output_tokens;
+    el('usage-total').textContent = total
+      ? tf('usageLine', { input: data.total.input_tokens.toLocaleString(), output: data.total.output_tokens.toLocaleString() })
+      : t('usageNone');
+    el('usage-by-source').innerHTML = Object.entries(data.by_source)
+      .sort((a, b) => (b[1].input_tokens + b[1].output_tokens) - (a[1].input_tokens + a[1].output_tokens))
+      .map(([src, u]) => `<div class="usage-row"><span>${escapeHtml(src === 'import' ? t('usageImport') : toolTitle(src))}</span>
+        <span>${(u.input_tokens + u.output_tokens).toLocaleString()}</span></div>`).join('');
+  } catch (e) {
+    el('usage-total').textContent = '';
+  }
+}
+
+// metric -> the tool that fixes it
+const HEALTH_METRICS = [
+  { key: 'foods_without_nutrition', tool: 'ingredients_enrich' },
+  { key: 'foods_without_category', tool: 'ingredients_enrich' },
+  { key: 'missing_conversions', tool: 'conversions' },
+  { key: 'recipes_not_translated', tool: 'recipes_translate' },
+  { key: 'recipes_need_restructure', tool: 'recipes_restructure' },
+  { key: 'recipes_without_season', tool: 'tags_season' },
+  { key: 'recipes_few_tags', tool: 'tags_suggest_more' },
+];
+
+function renderHealth(data) {
+  const running = data.running;
+  el('health-refresh-btn').disabled = running;
+  el('health-when').textContent = running ? t('healthRunning')
+    : data.error ? `${t('toolStatusError')}: ${data.error}`
+    : data.computed_at ? tf('healthComputedAt', { when: shortWhen(data.computed_at) }) : t('healthNever');
+  if (!data.computed_at) { el('health-grid').innerHTML = ''; return; }
+  el('health-grid').innerHTML = HEALTH_METRICS.map((m) => {
+    const value = data.metrics[m.key] ?? 0;
+    return `<div class="health-tile ${value ? 'todo' : 'ok'}">
+      <div class="health-value">${value ? value.toLocaleString() : '✓'}</div>
+      <div class="health-label">${t('health_' + m.key)}</div>
+      ${value ? `<button class="btn secondary health-fix" type="button" data-tool="${m.tool}">${t('healthFix')}</button>` : ''}
+    </div>`;
+  }).join('');
+  el('health-grid').querySelectorAll('.health-fix').forEach((b) => b.addEventListener('click', () => {
+    const start = document.querySelector(`.tool-start-btn[data-tool="${b.dataset.tool}"]`);
+    startTool(start.dataset.endpoint, toolTitle(b.dataset.tool));
+  }));
+}
+
+async function loadHealth() {
+  try {
+    const data = await (await fetch('/api/health')).json();
+    renderHealth(data);
+    clearTimeout(loadHealth.timer);
+    if (data.running && currentArea === 'maintain') loadHealth.timer = setTimeout(loadHealth, 3000);
+  } catch (e) { /* optional panel */ }
+}
+
+el('health-refresh-btn').addEventListener('click', async () => {
+  renderHealth(await (await fetch('/api/health/refresh', { method: 'POST' })).json());
+  loadHealth();
+});
 
 // ---------- Maintenance tools ----------
 
 const toolsState = { jobId: null, pollTimer: null, job: null, selected: new Set(), busy: false };
-
-el('tools-nav-btn').addEventListener('click', () => {
-  el('upload-screen').classList.add('hidden');
-  el('review-screen').classList.add('hidden');
-  el('processing-screen').classList.add('hidden');
-  el('action-bar').classList.add('hidden');
-  el('tools-screen').classList.remove('hidden');
-  el('tools-cards-view').classList.remove('hidden');
-  el('tools-run-view').classList.add('hidden');
-  loadNewRecipesStatus();
-  loadOpenRuns();
-  loadMealPlanOptions();
-});
 
 // ---------- Meal plan ----------
 
@@ -1021,48 +1288,162 @@ async function loadMealPlanOptions() {
   }
 }
 
-el('meal-plan-form').addEventListener('submit', (e) => {
+// The plan area shows one plan run as a week (one card per day) - checkbox
+// per day, "another recipe" per day, and one button to add the selected days
+// to Tandoor's meal plan. The last run is remembered per browser.
+const planState = { jobId: null, job: null, timer: null, selected: new Set(), busy: false };
+
+function rememberPlan(jobId) {
+  try { if (jobId) localStorage.setItem('th.planJob', jobId); else localStorage.removeItem('th.planJob'); } catch (e) { /* optional */ }
+}
+
+async function openPlanArea() {
+  loadMealPlanOptions();
+  if (!planState.jobId) {
+    try { planState.jobId = localStorage.getItem('th.planJob'); } catch (e) { planState.jobId = null; }
+  }
+  if (planState.jobId) pollPlan();
+}
+
+el('meal-plan-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const select = el('mp-meal');
-  startTool('/api/tools/meal-plan', t('toolMealPlanTitle'), {
-    start_date: el('mp-start').value,
-    days: Number(el('mp-days').value),
-    meal_type: { id: Number(select.value), name: select.options[select.selectedIndex]?.textContent || '' },
-    servings: Number(el('mp-servings').value),
-    wishes: el('mp-wishes').value,
-    add_to_shopping: el('mp-shopping').checked,
-  });
+  el('plan-error').classList.add('hidden');
+  el('plan-week').innerHTML = '';
+  el('plan-actions').classList.add('hidden');
+  el('plan-progress').classList.remove('hidden');
+  try {
+    const res = await fetch('/api/tools/meal-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start_date: el('mp-start').value,
+        days: Number(el('mp-days').value),
+        meal_type: { id: Number(select.value), name: select.options[select.selectedIndex]?.textContent || '' },
+        wishes: el('mp-wishes').value,
+        add_to_shopping: el('mp-shopping').checked,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    planState.jobId = data.job_id;
+    planState.selected.clear();
+    rememberPlan(data.job_id);
+    pollPlan();
+  } catch (err) {
+    el('plan-progress').classList.add('hidden');
+    showPlanError(err.message);
+  }
 });
 
-// Runs of the other tools that still have suggestions to review - they're
-// saved on the server, so they can be reopened after a reload or restart.
-// ("Process new recipes" lists its own runs in its card.)
-async function loadOpenRuns() {
-  const box = el('tools-open-runs');
+function showPlanError(msg) {
+  el('plan-error').textContent = msg;
+  el('plan-error').classList.remove('hidden');
+}
+
+async function pollPlan() {
+  clearTimeout(planState.timer);
   try {
-    const res = await fetch('/api/tools/jobs');
-    const runs = (await res.json()).filter((r) => r.tool !== 'new_recipes');
-    if (!runs.length) { box.classList.add('hidden'); return; }
-    const titleOf = (tool) => {
-      const card = document.querySelector(`.tool-start-btn[data-tool="${tool}"]`);
-      return card ? card.closest('.tool-card').querySelector('h3').textContent : tool;
-    };
-    el('tools-open-runs-list').innerHTML = runs.map((r) => {
-      const when = new Date(r.created_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-      const label = r.status === 'scanning'
-        ? tf('toolOpenRunRunning', { tool: titleOf(r.tool), when })
-        : tf('toolOpenRunPending', { tool: titleOf(r.tool), when, count: r.pending });
-      return `<div class="new-recipes-open-job"><span>${escapeHtml(label)}</span>
-        <button class="btn secondary" type="button" data-job-id="${r.id}" data-tool="${r.tool}">${t('toolNewRecipesOpenJob')}</button></div>`;
-    }).join('');
-    el('tools-open-runs-list').querySelectorAll('button').forEach((b) => {
-      b.addEventListener('click', () => openToolJob(b.dataset.jobId, titleOf(b.dataset.tool)));
-    });
-    box.classList.remove('hidden');
+    const res = await fetch(`/api/tools/jobs/${planState.jobId}`);
+    if (!res.ok) { planState.jobId = null; rememberPlan(null); el('plan-progress').classList.add('hidden'); return; }
+    const job = await res.json();
+    if (job.status === 'scanning') {
+      el('plan-progress').classList.remove('hidden');
+      planState.timer = setTimeout(pollPlan, 1500);
+      return;
+    }
+    el('plan-progress').classList.add('hidden');
+    if (job.status === 'error') { showPlanError(job.error || t('toolStartFailed')); return; }
+    // New plan: every suggested day is pre-selected.
+    if (!planState.job || planState.job.id !== job.id) {
+      planState.selected = new Set(job.suggestions.filter((s) => s.status === 'pending').map((s) => s.id));
+    }
+    renderWeek(job);
   } catch (e) {
-    box.classList.add('hidden');
+    el('plan-progress').classList.add('hidden');
+    showPlanError(e.message);
   }
 }
+
+function renderWeek(job) {
+  planState.job = job;
+  const days = job.meta.days || [...new Set(job.suggestions.map((s) => s.detail.date))];
+  const taken = new Set(job.meta.taken_days || []);
+  const byDate = {};
+  job.suggestions.forEach((s) => { byDate[s.detail.date] = s; });
+  el('plan-week').innerHTML = days.map((d) => {
+    const date = new Date(`${d}T12:00:00`);
+    const head = `<div class="plan-day-head"><strong>${date.toLocaleDateString([], { weekday: 'short' })}</strong> ${date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })}</div>`;
+    const s = byDate[d];
+    if (taken.has(d)) return `<div class="plan-day taken">${head}<div class="plan-empty">${t('planTaken')}</div></div>`;
+    const reroll = `<button class="btn secondary plan-reroll" type="button" data-date="${d}" ${planState.busy ? 'disabled' : ''} title="${t('planReroll')}">🎲 ${t('planReroll')}</button>`;
+    if (!s || s.status === 'skipped') return `<div class="plan-day empty">${head}<div class="plan-empty">${t('planNoSuggestion')}</div>${reroll}</div>`;
+    const d_ = s.detail;
+    const body = `<div class="plan-recipe">${escapeHtml(d_.recipe.name)}</div>
+      <div class="plan-meta">${d_.minutes ? `${d_.minutes} min` : ''}${d_.reason ? ` · ${escapeHtml(d_.reason)}` : ''}</div>`;
+    if (s.status === 'applied') return `<div class="plan-day applied">${head}${body}<div class="plan-done">✓ ${t('planApplied')}</div></div>`;
+    const error = s.status === 'error' ? `<div class="inbox-error">${escapeHtml(s.error || '')}</div>` : '';
+    return `<div class="plan-day ${planState.selected.has(s.id) ? 'selected' : ''}" data-id="${s.id}">
+      ${head}<label class="plan-check"><input type="checkbox" ${planState.selected.has(s.id) ? 'checked' : ''} ${planState.busy ? 'disabled' : ''}></label>
+      ${body}${error}${reroll}</div>`;
+  }).join('');
+
+  el('plan-week').querySelectorAll('.plan-day[data-id]').forEach((card) => {
+    const box = card.querySelector('input');
+    box.addEventListener('change', () => {
+      if (box.checked) planState.selected.add(card.dataset.id); else planState.selected.delete(card.dataset.id);
+      renderWeek(planState.job);
+    });
+  });
+  el('plan-week').querySelectorAll('.plan-reroll').forEach((b) => b.addEventListener('click', () => rerollDay(b.dataset.date)));
+  const pending = job.suggestions.filter((s) => s.status === 'pending' && planState.selected.has(s.id)).length;
+  el('plan-apply-btn').textContent = tf('planApplySelected', { count: pending });
+  el('plan-apply-btn').disabled = !pending || planState.busy;
+  el('plan-actions').classList.toggle('hidden', !days.length);
+}
+
+async function rerollDay(date) {
+  if (planState.busy) return;
+  planState.busy = true;
+  el('plan-status').textContent = t('planRerolling');
+  renderWeek(planState.job);
+  try {
+    const res = await fetch(`/api/tools/meal-plan/${planState.jobId}/reroll`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const fresh = data.suggestions.find((s) => s.detail.date === date);
+    if (fresh) planState.selected.add(fresh.id);
+    el('plan-status').textContent = '';
+    planState.busy = false;
+    renderWeek(data);
+  } catch (e) {
+    planState.busy = false;
+    el('plan-status').textContent = e.message;
+    renderWeek(planState.job);
+  }
+}
+
+el('plan-apply-btn').addEventListener('click', async () => {
+  const todo = planState.job.suggestions.filter((s) => s.status === 'pending' && planState.selected.has(s.id));
+  if (!todo.length || planState.busy) return;
+  planState.busy = true;
+  let failed = 0;
+  for (let n = 0; n < todo.length; n++) {
+    el('plan-status').textContent = tf('toolApplyingProgress', { current: n + 1, total: todo.length });
+    try {
+      const res = await fetch(`/api/tools/jobs/${planState.jobId}/suggestions/${todo[n].id}/apply`, { method: 'POST' });
+      const out = await res.json();
+      if (!res.ok || out.status === 'error') failed++;
+    } catch (e) { failed++; }
+    planState.selected.delete(todo[n].id);
+  }
+  planState.busy = false;
+  el('plan-status').textContent = failed ? tf('toolBulkFailed', { count: failed }) : t('planAppliedAll');
+  updateInboxBadge();
+  pollPlan();
+});
 
 async function loadNewRecipesStatus() {
   const label = el('new-recipes-status');
@@ -1116,7 +1497,6 @@ el('tools-back-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
   loadNewRecipesStatus();
-  loadOpenRuns();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
@@ -1342,6 +1722,7 @@ async function runBulkAction(action) {
     }
   } finally {
     toolsState.busy = false;
+    updateInboxBadge();
     status.textContent = failed ? tf('toolBulkFailed', { count: failed }) : '';
     if (toolsState.job) renderToolSuggestions(toolsState.job);
   }
@@ -1352,6 +1733,9 @@ async function runBulkAction(action) {
 (async function init() {
   await initI18n();
   await tryRestoreJobFromUrl();
+  showArea('import');
   checkTandoor();
   setInterval(checkTandoor, 15000);
+  updateInboxBadge();
+  setInterval(updateInboxBadge, 20000);
 })();

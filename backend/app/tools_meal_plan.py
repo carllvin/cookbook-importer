@@ -16,7 +16,7 @@ import uuid
 
 from . import llm_provider, tandoor_client, tool_jobs
 from .config import settings
-from .schemas import ToolSuggestion
+from .schemas import ToolJob, ToolSuggestion
 
 log = logging.getLogger("tandoor-helper")
 
@@ -74,6 +74,64 @@ def _minutes(recipe) -> int:
     return (recipe.get("working_time") or 0) + (recipe.get("waiting_time") or 0)
 
 
+def _candidates(client) -> list[dict]:
+    """Recipes that may be planned: not cooked in the last two weeks, best
+    rated first, capped to keep the prompt small."""
+    cutoff = dt.date.today() - dt.timedelta(days=RECENTLY_COOKED_DAYS)
+    recipes = [r for r in _fetch_all(client, "recipe")
+               if not (_date(r.get("last_cooked")) and _date(r.get("last_cooked")) >= cutoff)]
+    recipes.sort(key=lambda r: -(r.get("rating") or 0))
+    return recipes[:MAX_CANDIDATES]
+
+
+def _pick(job, candidates, days, params, exclude_ids=frozenset()) -> list[ToolSuggestion]:
+    """One AI call picking a recipe for each of `days`; returns validated
+    suggestions (unknown recipes, repeats and wrong dates are dropped)."""
+    meal_type = params["meal_type"]
+    pool = [r for r in candidates if r["id"] not in exclude_ids]
+    by_id = {r["id"]: r for r in pool}
+    lines = [
+        f"{r['id']}|{r.get('name', '')}|{','.join(k.get('label') or k.get('name', '') for k in r.get('keywords') or [])}|{_minutes(r) or '?'}"
+        for r in pool
+    ]
+    text_out, usage = llm_provider.complete_tool_text(
+        SYSTEM_PROMPT.replace("{language}", settings.output_language),
+        json.dumps({
+            "today": dt.date.today().isoformat(),
+            "meal": meal_type["name"],
+            "days": [f"{d.isoformat()} ({d.strftime('%A')})" for d in days],
+            "wishes": params.get("wishes") or "",
+            "recipes": lines,
+        }, ensure_ascii=False),
+        max_tokens=60 * len(days) + 200,
+    )
+    job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+    job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+    text_out = text_out.strip().strip("`")
+    if text_out.startswith("json"):
+        text_out = text_out[4:]
+    answers = json.loads(text_out)
+
+    suggestions, used = [], set()
+    for answer in answers if isinstance(answers, list) else []:
+        day = _date(answer.get("date")) if isinstance(answer, dict) else None
+        recipe = by_id.get(answer.get("recipe_id")) if day else None
+        if day not in days or recipe is None or recipe["id"] in used:
+            continue  # invalid date, unknown recipe or a repeat
+        used.add(recipe["id"])
+        minutes = _minutes(recipe)
+        reason = str(answer.get("reason") or "").strip()
+        suggestions.append(ToolSuggestion(
+            id=uuid.uuid4().hex[:10], kind="meal_plan",
+            summary=(f"{day.strftime('%a %d.%m.')} · {meal_type['name']}: {recipe.get('name', '')}"
+                     + (f" ({minutes} min)" if minutes else "") + (f" – {reason}" if reason else "")),
+            detail={"date": day.isoformat(), "recipe": {"id": recipe["id"], "name": recipe.get("name", "")},
+                    "minutes": minutes or None, "reason": reason or None,
+                    "meal_type": meal_type, "add_to_shopping": bool(params.get("add_to_shopping"))},
+        ))
+    return suggestions
+
+
 def run_scan(job_id: str) -> None:
     job = tool_jobs.get_tool_job(job_id)
     if job is None:
@@ -92,7 +150,7 @@ def run_scan(job_id: str) -> None:
         with tandoor_client.get_client() as client:
             job.progress_label = "Loading recipes and the existing meal plan..."
             tool_jobs.save_tool_job(job)
-            recipes = _fetch_all(client, "recipe")
+            candidates = _candidates(client)
             try:
                 planned = _fetch_all(client, "meal-plan", {"from_date": days[0].isoformat(), "to_date": days[-1].isoformat()})
             except Exception as exc:  # noqa: BLE001
@@ -101,60 +159,14 @@ def run_scan(job_id: str) -> None:
 
         taken = {_date(p.get("from_date")) for p in planned if (p.get("meal_type") or {}).get("id") == meal_type["id"]}
         free_days = [d for d in days if d not in taken]
-        if not free_days:
-            job.suggestions, job.status = [], "ready"
-            job.progress_label = None
-            tool_jobs.save_tool_job(job)
-            return
-
-        cutoff = dt.date.today() - dt.timedelta(days=RECENTLY_COOKED_DAYS)
-        candidates = [r for r in recipes if not (_date(r.get("last_cooked")) and _date(r.get("last_cooked")) >= cutoff)]
-        candidates.sort(key=lambda r: -(r.get("rating") or 0))
-        candidates = candidates[:MAX_CANDIDATES]
-        by_id = {r["id"]: r for r in candidates}
-        lines = [
-            f"{r['id']}|{r.get('name', '')}|{','.join(k.get('label') or k.get('name', '') for k in r.get('keywords') or [])}|{_minutes(r) or '?'}"
-            for r in candidates
-        ]
+        # For the week view: every day of the range, and which were already planned.
+        job.meta["days"] = [d.isoformat() for d in days]
+        job.meta["taken_days"] = sorted(d.isoformat() for d in taken if d in days)
         job.progress_total = len(free_days)
         job.progress_label = "Planning..."
         tool_jobs.save_tool_job(job)
 
-        text_out, usage = llm_provider.complete_tool_text(
-            SYSTEM_PROMPT.replace("{language}", settings.output_language),
-            json.dumps({
-                "today": dt.date.today().isoformat(),
-                "meal": meal_type["name"],
-                "days": [f"{d.isoformat()} ({d.strftime('%A')})" for d in free_days],
-                "wishes": params.get("wishes") or "",
-                "recipes": lines,
-            }, ensure_ascii=False),
-            max_tokens=60 * len(free_days) + 200,
-        )
-        job.token_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        job.token_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-        text_out = text_out.strip().strip("`")
-        if text_out.startswith("json"):
-            text_out = text_out[4:]
-        answers = json.loads(text_out)
-
-        suggestions, used = [], set()
-        for answer in answers if isinstance(answers, list) else []:
-            day = _date(answer.get("date")) if isinstance(answer, dict) else None
-            recipe = by_id.get(answer.get("recipe_id")) if day else None
-            if day not in free_days or recipe is None or recipe["id"] in used:
-                continue  # invalid date, unknown recipe or a repeat
-            used.add(recipe["id"])
-            minutes = _minutes(recipe)
-            reason = str(answer.get("reason") or "").strip()
-            suggestions.append(ToolSuggestion(
-                id=uuid.uuid4().hex[:10], kind="meal_plan",
-                summary=(f"{day.strftime('%a %d.%m.')} · {meal_type['name']}: {recipe.get('name', '')}"
-                         + (f" ({minutes} min)" if minutes else "") + (f" – {reason}" if reason else "")),
-                detail={"date": day.isoformat(), "recipe": {"id": recipe["id"], "name": recipe.get("name", "")},
-                        "meal_type": meal_type, "servings": int(params.get("servings") or 2),
-                        "add_to_shopping": bool(params.get("add_to_shopping"))},
-            ))
+        suggestions = _pick(job, candidates, free_days, params) if free_days else []
         suggestions.sort(key=lambda s: s.detail["date"])
         job.suggestions = suggestions
         job.status = "ready"
@@ -165,6 +177,31 @@ def run_scan(job_id: str) -> None:
         job.status = "error"
         job.error = str(exc)
         tool_jobs.save_tool_job(job)
+
+
+def reroll_day(job_id: str, date: str) -> ToolJob:
+    """Picks a different recipe for one day of a finished plan - replaces
+    that day's pending suggestion (or fills a day that had none). Recipes
+    already used elsewhere in this plan are excluded."""
+    job = tool_jobs.get_tool_job(job_id)
+    if job is None or job.tool != "meal_plan":
+        raise tandoor_client.TandoorError("Job not found.")
+    day = _date(date)
+    if day is None or date not in job.meta.get("days", []) or date in job.meta.get("taken_days", []):
+        raise tandoor_client.TandoorError("That day can't be planned here.")
+    current = [s for s in job.suggestions if s.detail.get("date") == date]
+    if any(s.status == "applied" for s in current):
+        raise tandoor_client.TandoorError("That day is already in the meal plan.")
+    exclude = {s.detail["recipe"]["id"] for s in job.suggestions if s.status != "skipped"}
+    with tandoor_client.get_client() as client:
+        candidates = _candidates(client)
+    picked = _pick(job, candidates, [day], job.meta.get("params", {}), exclude_ids=exclude)
+    if not picked:
+        raise tandoor_client.TandoorError("No other matching recipe found for that day.")
+    job.suggestions = [s for s in job.suggestions if s.detail.get("date") != date] + picked
+    job.suggestions.sort(key=lambda s: s.detail["date"])
+    tool_jobs.save_tool_job(job)
+    return job
 
 
 def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
@@ -181,7 +218,7 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     payload = {
         "title": "",
         "recipe": d["recipe"],
-        "servings": d["servings"],
+        "servings": 1,  # replaced below by the recipe's own servings
         "note": "",
         "from_date": d["date"],
         "to_date": d["date"],
@@ -193,6 +230,11 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     }
     try:
         with tandoor_client.get_client() as client:
+            # The recipe's own servings - so the shopping list gets exactly
+            # the amounts written in the recipe.
+            resp = client.get(f"/recipe/{d['recipe']['id']}/")
+            resp.raise_for_status()
+            payload["servings"] = resp.json().get("servings") or 1
             resp = client.post("/meal-plan/", json=payload)
             if resp.status_code == 400 and "date" in resp.text.lower():
                 # Newer Tandoor versions store plan dates as date-times.
