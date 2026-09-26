@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import health, ignored, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import apply_queue, health, ignored, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -294,6 +294,7 @@ async def inbox():
     """Every pending suggestion of every run, for the review inbox - plus the
     runs that are still scanning."""
     items, running = [], []
+    queued = apply_queue.queued_keys()
     for job in sorted(tool_jobs.list_all_tool_jobs(), key=lambda j: j.created_at):
         if job.status == "scanning":
             running.append({"id": job.id, "tool": job.tool, "created_at": job.created_at,
@@ -306,9 +307,9 @@ async def inbox():
                 "job_id": job.id, "tool": job.tool, "job_created_at": job.created_at,
                 "trigger": job.meta.get("trigger"), "auto": bool(job.meta.get("auto")),
                 "id": s.id, "kind": s.kind, "entity": s.detail.get("entity"),
-                "summary": s.summary, "preview": s.preview,
+                "summary": s.summary, "preview": s.preview, "queued": (job.id, s.id) in queued,
             })
-    return {"items": items, "running": running, "count": len(items)}
+    return {"items": items, "running": running, "count": len(items), "queued": len(queued)}
 
 
 @app.get("/api/health")
@@ -786,7 +787,8 @@ async def get_tool_job(job_id: str):
     job = tool_jobs.get_tool_job(job_id)
     if job is None:
         raise HTTPException(404, "Tool job not found.")
-    return job.model_dump()
+    queued = apply_queue.queued_keys()
+    return {**job.model_dump(), "queued_ids": [s.id for s in job.suggestions if (job.id, s.id) in queued]}
 
 
 @app.post("/api/tools/jobs/{job_id}/cancel")
@@ -806,33 +808,66 @@ async def cancel_tool_job(job_id: str):
     return job.model_dump()
 
 
-@app.post("/api/tools/jobs/{job_id}/suggestions/{suggestion_id}/apply")
-async def apply_tool_suggestion(job_id: str, suggestion_id: str):
+def _perform_suggestion_action(job_id: str, suggestion_id: str, action: str):
+    """Applies or skips one suggestion - used by the endpoints below and by
+    the background queue (apply_queue). Raises LookupError if the run or
+    suggestion is gone."""
     job = tool_jobs.get_tool_job(job_id)
     if job is None:
-        raise HTTPException(404, "Tool job not found.")
-    apply_fn = _TOOL_APPLY.get(job.tool)
-    if apply_fn is None:
-        raise HTTPException(400, f"Unknown tool: {job.tool}")
-    suggestion = apply_fn(job_id, suggestion_id)
-    if suggestion.status == "applied":
-        health.mark_changed()
+        raise LookupError("Tool job not found.")
+    if action == "apply":
+        apply_fn = _TOOL_APPLY.get(job.tool)
+        if apply_fn is None:
+            raise LookupError(f"Unknown tool: {job.tool}")
+        suggestion = apply_fn(job_id, suggestion_id)
+        if suggestion.status == "applied":
+            health.mark_changed()
+        return suggestion
+    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
+    if suggestion is None:
+        raise LookupError("Suggestion not found.")
+    if suggestion.status == "pending":
+        suggestion.status = "skipped"
+        tool_jobs.save_tool_job(job)
+        tools_new_recipes.after_action(job)
+    return suggestion
+
+
+apply_queue.configure(_perform_suggestion_action)
+
+
+@app.post("/api/tools/jobs/{job_id}/suggestions/{suggestion_id}/apply")
+async def apply_tool_suggestion(job_id: str, suggestion_id: str):
+    try:
+        suggestion = await asyncio.to_thread(_perform_suggestion_action, job_id, suggestion_id, "apply")
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
     return suggestion.model_dump()
 
 
 @app.post("/api/tools/jobs/{job_id}/suggestions/{suggestion_id}/skip")
 async def skip_tool_suggestion(job_id: str, suggestion_id: str):
-    job = tool_jobs.get_tool_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Tool job not found.")
-    suggestion = next((s for s in job.suggestions if s.id == suggestion_id), None)
-    if suggestion is None:
-        raise HTTPException(404, "Suggestion not found.")
-    if suggestion.status == "pending":
-        suggestion.status = "skipped"
-        tool_jobs.save_tool_job(job)
-        tools_new_recipes.after_action(job)
+    try:
+        suggestion = _perform_suggestion_action(job_id, suggestion_id, "skip")
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
     return suggestion.model_dump()
+
+
+@app.post("/api/tools/actions")
+async def queue_suggestion_actions(body: dict = Body(...)):
+    """{"action": "apply"|"skip", "items": [{"job_id", "id"}, ...]} - done in
+    the background, one after another, even if the page is closed."""
+    try:
+        batch_id = apply_queue.enqueue(body.get("action", ""), body.get("items") or [])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"batch_id": batch_id, **apply_queue.status(batch_id)}
+
+
+@app.get("/api/tools/actions")
+async def suggestion_actions_status(batch: str | None = None):
+    return apply_queue.status(batch)
 
 
 @app.get("/api/config")
@@ -882,6 +917,7 @@ async def on_startup() -> None:
         log.info("Restored %d tool run(s) from disk", loaded)
     tool_jobs.cleanup_old_tool_jobs(settings.job_retention_hours)
     asyncio.create_task(_cleanup_loop())
+    apply_queue.start()
     if settings.auto_process_interval_hours > 0:
         asyncio.create_task(tools_new_recipes.auto_run_loop())
 
