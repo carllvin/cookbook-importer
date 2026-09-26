@@ -159,6 +159,9 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
             toc_pages=toc_pages,
             existing_tags=existing_tags,
         )
+        if doc_type == "url":
+            for recipe in recipes:
+                recipe.source_url = source_paths[0]
         job.recipes = recipes
         job.token_usage.add(usage)
         jobs.match_images_to_recipes(job)

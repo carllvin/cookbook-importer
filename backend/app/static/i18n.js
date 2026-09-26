@@ -17,6 +17,7 @@ const TRANSLATIONS = {
 
     uploadHeadline: 'Aus dem Kochbuch in deine Rezeptdatenbank',
     uploadLede: 'Lade ein PDF hoch. Claude liest jede Seite, erkennt einzelne Rezepte samt Zutaten, Zeiten und Bildern – du wählst danach aus, was in Tandoor landet.',
+    sourceUrlLabel: 'Importiert von',
     urlImportOr: 'oder ein einzelnes Rezept von einer Webseite importieren',
     urlImportBtn: 'Importieren',
     urlImportLoading: 'Lade die Rezeptseite …',
@@ -206,6 +207,7 @@ const TRANSLATIONS = {
 
     uploadHeadline: 'Turn your cookbook into a recipe database',
     uploadLede: 'Upload a PDF. Claude reads every page, detects individual recipes with ingredients, times and images – then you choose what goes into Tandoor.',
+    sourceUrlLabel: 'Imported from',
     urlImportOr: 'or import a single recipe from a website',
     urlImportBtn: 'Import',
     urlImportLoading: 'Loading the recipe page …',
@@ -395,6 +397,7 @@ const TRANSLATIONS = {
 
     uploadHeadline: 'Transformez votre livre de cuisine en base de recettes',
     uploadLede: 'Importez un PDF. Claude lit chaque page, détecte les recettes avec ingrédients, temps et images – vous choisissez ensuite ce qui part vers Tandoor.',
+    sourceUrlLabel: 'Importé depuis',
     urlImportOr: 'ou importer une recette depuis un site web',
     urlImportBtn: 'Importer',
     urlImportLoading: 'Chargement de la page de la recette …',
@@ -584,6 +587,7 @@ const TRANSLATIONS = {
 
     uploadHeadline: 'Trasforma il tuo ricettario in un database di ricette',
     uploadLede: 'Carica un PDF. Claude legge ogni pagina, individua le singole ricette con ingredienti, tempi e immagini – poi scegli cosa importare in Tandoor.',
+    sourceUrlLabel: 'Importato da',
     urlImportOr: 'oppure importa una singola ricetta da un sito web',
     urlImportBtn: 'Importa',
     urlImportLoading: 'Caricamento della pagina della ricetta …',
@@ -773,6 +777,7 @@ const TRANSLATIONS = {
 
     uploadHeadline: 'Convierte tu recetario en una base de datos de recetas',
     uploadLede: 'Sube un PDF. Claude lee cada página, detecta recetas individuales con ingredientes, tiempos e imágenes – luego eliges qué se importa a Tandoor.',
+    sourceUrlLabel: 'Importado de',
     urlImportOr: 'o importar una receta de una página web',
     urlImportBtn: 'Importar',
     urlImportLoading: 'Cargando la página de la receta …',

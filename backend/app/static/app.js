@@ -612,6 +612,7 @@ function renderDetail(r) {
     <div class="field description-field">
       <textarea id="f-description" placeholder="${t('descriptionPlaceholder')}">${escapeHtml(r.description ?? '')}</textarea>
     </div>
+    ${r.source_url ? `<div class="source-line">${t('sourceUrlLabel')}: <a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener">${escapeHtml(r.source_url.replace(/^https?:\/\/(www\.)?/, ''))}</a></div>` : ''}
 
     <div class="section-title">${t('fieldImage')}</div>
     <div class="image-picker">${imageChoicesHtml}</div>
