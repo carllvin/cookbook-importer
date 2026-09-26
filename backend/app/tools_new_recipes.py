@@ -13,7 +13,8 @@ Per run, for the new recipes only:
    servings/times (reviewed like the rest).
 2. Match the units, ingredients and tags these recipes introduced against
    the existing ones (translate / merge into an existing entry).
-3. Fill in plural, nutrition and supermarket category for new ingredients.
+3. Fill in plural, nutrition and supermarket category for new ingredients,
+   and the gram conversions Tandoor needs to calculate their nutrition.
 4. Suggest a season tag and further tags.
 Steps 2-4 become suggestions that are applied after review. The recipes are
 recorded as handled once every suggestion is applied or skipped - so if the
@@ -29,7 +30,7 @@ import threading
 import time
 import uuid
 
-from . import llm_provider, nutrition_properties, recipe_restructure, tandoor_client, tool_jobs, tools_ingredients, tools_recipes, tools_tags, tools_units
+from . import llm_provider, nutrition_properties, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_ingredients, tools_recipes, tools_tags, tools_units
 from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import find_recipes_by_filter, resolve_name_collisions
@@ -415,6 +416,7 @@ def run_scan(job_id: str) -> None:
             # later steps judge the final name (e.g. no plural "Lauch" for an
             # ingredient about to be renamed from "leek" to "Lauch").
             final_names = {"food": {}, "keyword": {}}
+            merged_into = {"food": {}, "unit": {}}  # removed id -> kept id, once pending merges are applied
             if not job.cancel_requested:
                 job.progress_label = "Comparing units, ingredients and tags with existing ones..."
                 tool_jobs.save_tool_job(job)
@@ -452,6 +454,9 @@ def run_scan(job_id: str) -> None:
                     for action in actions:
                         if entity == "food" and action["type"] == "merge":
                             removed_food_ids.update(action["remove_ids"])
+                        if entity in merged_into and action["type"] == "merge":
+                            for removed in action["remove_ids"]:
+                                merged_into[entity][removed] = action["keep_id"]
                         if entity in final_names:
                             if action["type"] == "rename":
                                 final_names[entity][action["id"]] = action["new_name"]
@@ -480,6 +485,26 @@ def run_scan(job_id: str) -> None:
                         nutrition_available = False
                     targets = tools_ingredients.enrich_targets(foods, categories, nutrition_available)
                     suggestions += tools_ingredients.enrich_suggestions(job, targets, categories)
+
+                # 3b. Gram conversions for the new recipes' ingredient lines,
+                # so Tandoor can calculate their nutrition - judged as if the
+                # pending merges were applied, and counting ingredients that
+                # are about to get nutrition values from step 3.
+                if not job.cancel_requested:
+                    pairs = {}
+                    for (food_id, unit_id), count in tools_conversions.recipe_pairs(recipes).items():
+                        key = (merged_into["food"].get(food_id, food_id), merged_into["unit"].get(unit_id, unit_id))
+                        pairs[key] = pairs.get(key, 0) + count
+                    pending_nutrition = {
+                        sug.detail["food_id"]: sug.detail["nutrition"]["basis"]
+                        for sug in suggestions if sug.kind == "enrich" and sug.detail.get("nutrition")
+                    }
+                    try:
+                        suggestions += tools_conversions.conversion_suggestions(
+                            job, client, pairs, pending_nutrition, final_names["food"]
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Conversion suggestions failed: %s", exc)
 
                 # 4. Season + more tags for the new recipes, judged by their
                 # tags' final names.
@@ -543,6 +568,8 @@ def apply_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
         result = tools_units.apply_suggestion(job_id, suggestion_id)
     elif suggestion.kind == "enrich":
         result = tools_ingredients.apply_enrich_suggestion(job_id, suggestion_id)
+    elif suggestion.kind == "conversion":
+        result = tools_conversions.apply_suggestion(job_id, suggestion_id)
     else:  # keyword rename/merge, season, suggest_tags
         result = tools_tags.apply_suggestion(job_id, suggestion_id)
     after_action(job)
