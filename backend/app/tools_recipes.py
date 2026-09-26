@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs
+from . import ignored, llm_provider, tandoor_client, tool_jobs
 from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import fetch_all_recipes_full, format_cost_estimate, minimal_ref
@@ -212,7 +212,9 @@ def run_scan(job_id: str) -> None:
             job.progress_label = "Scanning every recipe's full detail..."
             tool_jobs.save_tool_job(job)
             recipes = fetch_all_recipes_full(client)
-            needing = [r for r in recipes if not already_in_target_language(r, expected_code)]
+            skip = ignored.keys("recipes_not_translated")
+            needing = [r for r in recipes
+                       if str(r["id"]) not in skip and not already_in_target_language(r, expected_code)]
             job.progress_total = len(needing)
             job.cost_estimate = format_cost_estimate(len(needing), "per_recipe_translate")
             tool_jobs.save_tool_job(job)

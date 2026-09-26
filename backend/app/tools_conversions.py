@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from . import llm_provider, tandoor_client, tool_jobs, tools_ingredients, tools_tags
+from . import ignored, llm_provider, tandoor_client, tool_jobs, tools_ingredients, tools_tags
 from .config import settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, fetch_all_recipes_full
@@ -88,14 +88,18 @@ def recipe_pairs(recipes) -> dict[tuple[int, int], int]:
     return pairs
 
 
-def find_missing(client, pairs, pending_nutrition=None, food_names=None) -> tuple[list[ToolSuggestion], list[dict]]:
+def find_missing(client, pairs, pending_nutrition=None, food_names=None,
+                 respect_ignored=True) -> tuple[list[ToolSuggestion], list[dict]]:
     """The no-AI part: (ready general metric conversions, pairs that need an
     AI estimate). Also used by the health overview to count what's missing.
 
     pending_nutrition: food id -> "g"/"ml" for foods that don't have
     nutrition values yet but will once a pending suggestion is applied (they
     need conversions too). food_names: food id -> name to show/ask with
-    (e.g. the name after a pending rename)."""
+    (e.g. the name after a pending rename). respect_ignored: leave out the
+    pairs the user ignored in the health overview (off for the overview
+    itself, which filters them when read)."""
+    skip = ignored.keys("missing_conversions") if respect_ignored else set()
     pending_nutrition = pending_nutrition or {}
     food_names = food_names or {}
     foods = {f["id"]: f for f in tools_ingredients.fetch_all_foods_full(client)}
@@ -137,7 +141,7 @@ def find_missing(client, pairs, pending_nutrition=None, food_names=None) -> tupl
             continue
         metric = METRIC.get(_key(unit["name"]))
         if metric and _key(metric[0]) == _key(target["name"]):
-            if unit_id not in general_done:
+            if unit_id not in general_done and f"*:{unit_id}" not in skip:
                 general_done.add(unit_id)
                 suggestions.append(ToolSuggestion(
                     id=uuid.uuid4().hex[:10], kind="conversion",
@@ -146,6 +150,8 @@ def find_missing(client, pairs, pending_nutrition=None, food_names=None) -> tupl
                             "converted_unit": {"id": target["id"], "name": target["name"]},
                             "converted_amount": metric[1]},
                 ))
+            continue
+        if f"{food_id}:{unit_id}" in skip:
             continue
         name = food_names.get(food_id, food["name"])
         to_estimate.append({"food": {"id": food["id"], "name": name}, "unit": unit, "target": target, "count": count})

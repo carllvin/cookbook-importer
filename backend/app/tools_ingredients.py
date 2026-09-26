@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 
-from . import llm_provider, nutrition_properties, tandoor_client, tool_jobs
+from . import ignored, llm_provider, nutrition_properties, tandoor_client, tool_jobs
 from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
@@ -350,13 +350,18 @@ def _describe_enrich(name, plural, nutrition, category):
 def enrich_targets(foods, categories, nutrition_available=True) -> list[dict]:
     """The subset of full food dicts that miss a plural, nutrition (only
     asked when matching property types exist in Tandoor), or (when any
-    categories exist to pick from) a supermarket category."""
+    categories exist to pick from) a supermarket category. Nutrition and
+    category are not asked for foods the user ignored for them in the
+    health overview."""
+    skip_nutrition = ignored.keys("foods_without_nutrition")
+    skip_category = ignored.keys("foods_without_category")
     targets = []
     for food in foods:
         needs_plural = not (food.get("plural_name") or "").strip()
-        needs_nutrition = nutrition_available and not food.get("properties")
+        needs_nutrition = nutrition_available and not food.get("properties") and str(food["id"]) not in skip_nutrition
         # No existing categories -> nothing to pick from, so never ask.
-        needs_category = bool(categories) and not food.get("supermarket_category")
+        needs_category = (bool(categories) and not food.get("supermarket_category")
+                          and str(food["id"]) not in skip_category)
         if needs_plural or needs_nutrition or needs_category:
             targets.append({"id": food["id"], "name": food["name"], "needs_plural": needs_plural,
                             "needs_nutrition": needs_nutrition, "needs_category": needs_category})

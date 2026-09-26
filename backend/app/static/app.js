@@ -1216,25 +1216,124 @@ const HEALTH_METRICS = [
   { key: 'recipes_few_tags', tool: 'tags_suggest_more' },
 ];
 
+const healthState = { open: null, data: null };
+
 function renderHealth(data) {
+  healthState.data = data;
   const running = data.running;
   el('health-refresh-btn').disabled = running;
   el('health-when').textContent = running ? t('healthRunning')
     : data.error ? `${t('toolStatusError')}: ${data.error}`
     : data.computed_at ? tf('healthComputedAt', { when: shortWhen(data.computed_at) }) : t('healthNever');
-  if (!data.computed_at) { el('health-grid').innerHTML = ''; return; }
+  if (!data.computed_at) { el('health-grid').innerHTML = ''; closeHealthDetail(); return; }
   el('health-grid').innerHTML = HEALTH_METRICS.map((m) => {
     const value = data.metrics[m.key] ?? 0;
-    return `<div class="health-tile ${value ? 'todo' : 'ok'}">
+    const ignoredCount = (data.ignored || {})[m.key] || 0;
+    return `<div class="health-tile ${value ? 'todo' : 'ok'} ${healthState.open === m.key ? 'open' : ''}">
       <div class="health-value">${value ? value.toLocaleString() : '✓'}</div>
       <div class="health-label">${t('health_' + m.key)}</div>
-      ${value ? `<button class="btn secondary health-fix" type="button" data-tool="${m.tool}">${t('healthFix')}</button>` : ''}
+      ${ignoredCount ? `<div class="health-ignored-count">${tf('healthIgnoredCount', { n: ignoredCount })}</div>` : ''}
+      <div class="health-tile-actions">
+        ${value ? `<button class="btn secondary health-fix" type="button" data-tool="${m.tool}">${t('healthFix')}</button>` : ''}
+        ${value || ignoredCount ? `<button class="btn secondary health-entries" type="button" data-metric="${m.key}">${t('healthEntries')}</button>` : ''}
+      </div>
     </div>`;
   }).join('');
   el('health-grid').querySelectorAll('.health-fix').forEach((b) => b.addEventListener('click', () => {
     const start = document.querySelector(`.tool-start-btn[data-tool="${b.dataset.tool}"]`);
     startTool(start.dataset.endpoint, toolTitle(b.dataset.tool));
   }));
+  el('health-grid').querySelectorAll('.health-entries').forEach((b) => b.addEventListener('click', () => {
+    if (healthState.open === b.dataset.metric) closeHealthDetail();
+    else openHealthDetail(b.dataset.metric);
+  }));
+}
+
+function closeHealthDetail() {
+  healthState.open = null;
+  el('health-detail').classList.add('hidden');
+  el('health-detail').innerHTML = '';
+  el('health-grid').querySelectorAll('.health-tile.open').forEach((tile) => tile.classList.remove('open'));
+}
+
+function healthRow(item) {
+  const link = item.recipe_id && APP_CONFIG.tandoor_url
+    ? ` <a href="${APP_CONFIG.tandoor_url}/view/recipe/${item.recipe_id}" target="_blank" rel="noopener" title="${escapeHtml(t('openInTandoorBtn'))}">↗</a>`
+    : '';
+  return `<label class="health-row" data-name="${escapeHtml(item.name.toLowerCase())}">
+    <input type="checkbox" data-key="${escapeHtml(item.key)}" data-name="${escapeHtml(item.name)}" />
+    <span>${escapeHtml(item.name)}${link}</span></label>`;
+}
+
+async function openHealthDetail(metric, scroll = true) {
+  healthState.open = metric;
+  renderHealth(healthState.data);
+  let data;
+  try {
+    data = await (await fetch(`/api/health/items/${metric}`)).json();
+  } catch (e) { return; }
+  if (healthState.open !== metric) return;
+  const box = el('health-detail');
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="health-detail-head">
+      <h4>${escapeHtml(t('health_' + metric))}</h4>
+      <button class="btn secondary health-detail-close" type="button">${t('modalClose')}</button>
+    </div>
+    <p class="health-detail-hint">${t('healthIgnoreHint')}</p>
+    ${data.items.length ? `
+      <div class="health-detail-bar">
+        <input type="search" class="health-filter" placeholder="${escapeHtml(t('healthFilter'))}" />
+        <label><input type="checkbox" class="health-select-all" /> ${t('healthSelectAll')}</label>
+        <button class="btn health-ignore-btn" type="button" disabled>${t('healthIgnoreSelected')}</button>
+      </div>
+      <div class="health-list health-open-list">${data.items.map(healthRow).join('')}</div>`
+    : `<p class="health-detail-hint">${t('healthNoEntries')}</p>`}
+    ${data.ignored.length ? `
+      <details class="health-ignored">
+        <summary>${tf('healthIgnoredTitle', { n: data.ignored.length })}</summary>
+        <div class="health-list health-ignored-list">${data.ignored.map(healthRow).join('')}</div>
+        <button class="btn secondary health-unignore-btn" type="button" disabled>${t('healthUnignoreSelected')}</button>
+      </details>` : ''}`;
+
+  if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  box.querySelector('.health-detail-close').addEventListener('click', closeHealthDetail);
+  const openList = box.querySelector('.health-open-list');
+  const ignoreBtn = box.querySelector('.health-ignore-btn');
+  const unignoreBtn = box.querySelector('.health-unignore-btn');
+  const checked = (list) => (list ? [...list.querySelectorAll('input:checked')] : []);
+  const sync = () => {
+    if (ignoreBtn) ignoreBtn.disabled = !checked(openList).length;
+    if (unignoreBtn) unignoreBtn.disabled = !checked(box.querySelector('.health-ignored-list')).length;
+  };
+  box.addEventListener('change', sync);
+
+  const filter = box.querySelector('.health-filter');
+  if (filter) filter.addEventListener('input', () => {
+    const q = filter.value.trim().toLowerCase();
+    openList.querySelectorAll('.health-row').forEach((row) => row.classList.toggle('hidden', !!q && !row.dataset.name.includes(q)));
+  });
+  const selectAll = box.querySelector('.health-select-all');
+  if (selectAll) selectAll.addEventListener('change', () => {
+    openList.querySelectorAll('.health-row:not(.hidden) input').forEach((cb) => { cb.checked = selectAll.checked; });
+    sync();
+  });
+
+  const post = async (url, body) => {
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (resp.ok) {
+      renderHealth(await resp.json());
+      openHealthDetail(metric, false);
+    }
+  };
+  if (ignoreBtn) ignoreBtn.addEventListener('click', () => {
+    ignoreBtn.disabled = true;
+    post('/api/health/ignore', { metric, items: checked(openList).map((cb) => ({ key: cb.dataset.key, name: cb.dataset.name })) });
+  });
+  if (unignoreBtn) unignoreBtn.addEventListener('click', () => {
+    unignoreBtn.disabled = true;
+    post('/api/health/unignore', { metric, keys: checked(box.querySelector('.health-ignored-list')).map((cb) => cb.dataset.key) });
+  });
 }
 
 async function loadHealth() {

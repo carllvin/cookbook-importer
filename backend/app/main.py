@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import health, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import health, ignored, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -319,6 +319,31 @@ async def health_overview():
 @app.post("/api/health/refresh")
 async def health_refresh():
     health.start_refresh()
+    return health.cached()
+
+
+@app.get("/api/health/items/{metric}")
+async def health_items(metric: str):
+    try:
+        return health.items(metric)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post("/api/health/ignore")
+async def health_ignore(body: dict = Body(...)):
+    """{"metric": ..., "items": [{"key", "name"}]} - ignore these entries."""
+    try:
+        ignored.add(body.get("metric", ""), body.get("items") or [])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return health.cached()
+
+
+@app.post("/api/health/unignore")
+async def health_unignore(body: dict = Body(...)):
+    """{"metric": ..., "keys": [...]} - count these entries again."""
+    ignored.remove(body.get("metric", ""), body.get("keys") or [])
     return health.cached()
 
 
