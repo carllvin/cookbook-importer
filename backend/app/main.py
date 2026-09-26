@@ -589,6 +589,22 @@ async def start_new_recipes():
     return _start_tool_job("new_recipes")
 
 
+@app.get("/api/tools/jobs")
+async def list_open_tool_jobs():
+    """Runs that still have suggestions to review (newest first) - so they
+    can be reopened after a reload or a container restart."""
+    open_jobs = [
+        job for job in tool_jobs.list_all_tool_jobs()
+        if job.status in ("ready", "cancelled", "scanning")
+        and (job.status == "scanning" or any(s.status == "pending" for s in job.suggestions))
+    ]
+    return [
+        {"id": job.id, "tool": job.tool, "status": job.status, "created_at": job.created_at,
+         "pending": sum(1 for s in job.suggestions if s.status == "pending")}
+        for job in sorted(open_jobs, key=lambda j: -j.created_at)
+    ]
+
+
 @app.get("/api/tools/jobs/{job_id}")
 async def get_tool_job(job_id: str):
     job = tool_jobs.get_tool_job(job_id)
@@ -672,6 +688,7 @@ async def _cleanup_loop() -> None:
     while True:
         try:
             jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+            tool_jobs.cleanup_old_tool_jobs(settings.job_retention_hours)
         except Exception:  # noqa: BLE001
             log.exception("Background cleanup failed")
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
@@ -682,6 +699,10 @@ async def on_startup() -> None:
     # Run once immediately (covers jobs left over from a previous container run),
     # then keep running in the background for as long as the app is up.
     jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+    loaded = tool_jobs.load_tool_jobs()
+    if loaded:
+        log.info("Restored %d tool run(s) from disk", loaded)
+    tool_jobs.cleanup_old_tool_jobs(settings.job_retention_hours)
     asyncio.create_task(_cleanup_loop())
     if settings.auto_process_interval_hours > 0:
         asyncio.create_task(tools_new_recipes.auto_run_loop())

@@ -946,7 +946,38 @@ el('tools-nav-btn').addEventListener('click', () => {
   el('tools-cards-view').classList.remove('hidden');
   el('tools-run-view').classList.add('hidden');
   loadNewRecipesStatus();
+  loadOpenRuns();
 });
+
+// Runs of the other tools that still have suggestions to review - they're
+// saved on the server, so they can be reopened after a reload or restart.
+// ("Process new recipes" lists its own runs in its card.)
+async function loadOpenRuns() {
+  const box = el('tools-open-runs');
+  try {
+    const res = await fetch('/api/tools/jobs');
+    const runs = (await res.json()).filter((r) => r.tool !== 'new_recipes');
+    if (!runs.length) { box.classList.add('hidden'); return; }
+    const titleOf = (tool) => {
+      const card = document.querySelector(`.tool-start-btn[data-tool="${tool}"]`);
+      return card ? card.closest('.tool-card').querySelector('h3').textContent : tool;
+    };
+    el('tools-open-runs-list').innerHTML = runs.map((r) => {
+      const when = new Date(r.created_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      const label = r.status === 'scanning'
+        ? tf('toolOpenRunRunning', { tool: titleOf(r.tool), when })
+        : tf('toolOpenRunPending', { tool: titleOf(r.tool), when, count: r.pending });
+      return `<div class="new-recipes-open-job"><span>${escapeHtml(label)}</span>
+        <button class="btn secondary" type="button" data-job-id="${r.id}" data-tool="${r.tool}">${t('toolNewRecipesOpenJob')}</button></div>`;
+    }).join('');
+    el('tools-open-runs-list').querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => openToolJob(b.dataset.jobId, titleOf(b.dataset.tool)));
+    });
+    box.classList.remove('hidden');
+  } catch (e) {
+    box.classList.add('hidden');
+  }
+}
 
 async function loadNewRecipesStatus() {
   const label = el('new-recipes-status');
@@ -1000,6 +1031,7 @@ el('tools-back-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
   loadNewRecipesStatus();
+  loadOpenRuns();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
