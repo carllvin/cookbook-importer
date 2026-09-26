@@ -1074,7 +1074,7 @@ async function updateInboxBadge() {
   } catch (e) { /* badge is best-effort */ }
 }
 
-async function loadInbox() {
+async function loadInbox(schedule = true) {
   try {
     const data = await (await fetch('/api/inbox')).json();
     inboxState.items = data.items;
@@ -1084,10 +1084,14 @@ async function loadInbox() {
       <div class="inbox-running-row"><span class="spinner small"></span>
         ${escapeHtml(tf('inboxRunning', { tool: r.trigger === 'import' ? t('triggerImport') : toolTitle(r.tool) }))}
         ${r.label ? `<span class="inbox-source">${escapeHtml(r.label)}</span>` : ''}</div>`).join('');
+    el('inbox-queue').classList.toggle('hidden', !data.queued);
+    el('inbox-queue').innerHTML = data.queued
+      ? `<span class="spinner small"></span> ${escapeHtml(tf('queueRunning', { n: data.queued }))}` : '';
     renderInbox();
     updateInboxBadge();
+    if (!schedule) return;
     clearTimeout(inboxState.timer);
-    if (data.running.length && currentArea === 'inbox') inboxState.timer = setTimeout(loadInbox, 4000);
+    if ((data.running.length || data.queued) && currentArea === 'inbox') inboxState.timer = setTimeout(loadInbox, data.queued ? 2000 : 4000);
   } catch (e) {
     el('inbox-groups').innerHTML = `<div class="error-banner">${escapeHtml(e.message)}</div>`;
   }
@@ -1103,6 +1107,7 @@ function renderInbox() {
   }
   el('inbox-groups').innerHTML = visible.map((g) => {
     const selected = g.items.filter((i) => inboxState.selected.has(itemKey(i))).length;
+    const selectable = g.items.filter((i) => !i.queued).length;
     const busy = inboxState.busyGroup === g.key;
     const collapsed = inboxState.collapsed.has(g.key);
     return `
@@ -1111,7 +1116,7 @@ function renderInbox() {
         <button type="button" class="inbox-collapse" data-group="${g.key}">${collapsed ? '▸' : '▾'}</button>
         <h2>${g.icon} ${t('inboxGroup_' + g.key)} <span class="inbox-count">${g.items.length}</span></h2>
         <label class="tools-select-all"><input type="checkbox" class="inbox-select-all" data-group="${g.key}"
-          ${selected === g.items.length ? 'checked' : ''} ${busy ? 'disabled' : ''}> <span>${t('toolSelectAll')}</span></label>
+          ${selectable && selected === selectable ? 'checked' : ''} ${busy || !selectable ? 'disabled' : ''}> <span>${t('toolSelectAll')}</span></label>
         <span class="tools-bulk-status" id="inbox-status-${g.key}">${escapeHtml(inboxState.results[g.key] || '')}</span>
         <div class="tools-bulk-actions">
           <button class="btn secondary inbox-skip" type="button" data-group="${g.key}" ${!selected || busy ? 'disabled' : ''}>${t('toolSkipBtn')} (${selected})</button>
@@ -1121,10 +1126,10 @@ function renderInbox() {
       ${g.key === 'merges' ? `<p class="inbox-hint">${t('inboxMergesHint')}</p>` : ''}
       <div class="tools-suggestions-list ${collapsed ? 'hidden' : ''}">
         ${g.items.map((i) => `
-          <div class="tool-suggestion-row pending" data-key="${itemKey(i)}">
-            <input type="checkbox" class="suggestion-check" ${inboxState.selected.has(itemKey(i)) ? 'checked' : ''} ${busy ? 'disabled' : ''}>
+          <div class="tool-suggestion-row pending ${i.queued ? 'queued' : ''}" data-key="${itemKey(i)}">
+            <input type="checkbox" class="suggestion-check" ${inboxState.selected.has(itemKey(i)) ? 'checked' : ''} ${busy || i.queued ? 'disabled' : ''}>
             <div class="suggestion-text">
-              ${escapeHtml(i.summary)}
+              ${i.queued ? `<span class="queued-label">⏳ ${t('queuedLabel')}</span> ` : ''}${escapeHtml(i.summary)}
               <div class="inbox-source">${escapeHtml(i.trigger === 'import' ? t('triggerImport') : toolTitle(i.tool))} · ${escapeHtml(shortWhen(i.job_created_at))}</div>
               ${i.preview ? `<details class="suggestion-preview"><summary>${t('toolShowPreview')}</summary><pre>${escapeHtml(i.preview)}</pre></details>` : ''}
             </div>
@@ -1141,7 +1146,7 @@ function renderInbox() {
   }));
   el('inbox-groups').querySelectorAll('.inbox-select-all').forEach((box) => box.addEventListener('change', () => {
     groupItems(box.dataset.group).forEach((i) => {
-      if (box.checked) inboxState.selected.add(itemKey(i)); else inboxState.selected.delete(itemKey(i));
+      if (box.checked && !i.queued) inboxState.selected.add(itemKey(i)); else inboxState.selected.delete(itemKey(i));
     });
     renderInbox();
   }));
@@ -1153,7 +1158,7 @@ function renderInbox() {
     };
     box.addEventListener('change', toggle);
     row.addEventListener('click', (e) => {
-      if (inboxState.busyGroup || e.target === box || e.target.closest('details')) return;
+      if (inboxState.busyGroup || box.disabled || e.target === box || e.target.closest('details')) return;
       box.checked = !box.checked;
       toggle();
     });
@@ -1163,40 +1168,72 @@ function renderInbox() {
   }));
 }
 
+// ---------- Background apply/skip ----------
+// Selected suggestions are handed to the server's queue, which applies them
+// one after another in the background - closing the page doesn't stop it.
+
+async function queueActions(action, items) {
+  const res = await fetch('/api/tools/actions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, items: items.map((i) => ({ job_id: i.job_id, id: i.id })) }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()).batch_id;
+}
+
+// Polls a batch until it's done while `stillWatching()` holds; calls
+// onTick(batch) after every poll. Returns the final batch (or null).
+async function watchBatch(batchId, onTick, stillWatching = () => true) {
+  for (;;) {
+    let batch = null;
+    try {
+      batch = (await (await fetch(`/api/tools/actions?batch=${batchId}`)).json()).batch;
+    } catch (e) { /* try again */ }
+    if (batch) await onTick(batch);
+    if (!batch || batch.done >= batch.total) return batch;
+    if (!stillWatching()) return null;
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+}
+
+function batchProgressText(action, batch, withHint = true) {
+  return tf(action === 'apply' ? 'toolApplyingProgress' : 'toolSkippingProgress', { current: Math.min(batch.done + 1, batch.total), total: batch.total })
+    + (withHint ? ' · ' + t('queueBackgroundHint') : '');
+}
+
+// withDetail: name the first error too - for the inbox, where failed
+// suggestions drop out of the list instead of showing their error.
+function batchResultText(batch, withDetail = false) {
+  if (!batch || !batch.failed) return '';
+  const first = batch.errors[0];
+  if (!withDetail || !first) return tf('toolBulkFailed', { count: batch.failed });
+  return tf('inboxBulkFailed', { count: batch.failed }) + ` ${first.summary ? first.summary + ': ' : ''}${first.error}`;
+}
+
 async function runInboxAction(groupKey, action, items) {
-  const todo = items.filter((i) => inboxState.selected.has(itemKey(i)));
+  const todo = items.filter((i) => inboxState.selected.has(itemKey(i)) && !i.queued);
   if (!todo.length || inboxState.busyGroup) return;
   inboxState.busyGroup = groupKey;
   inboxState.results[groupKey] = '';
-  renderInbox();
-  let failed = 0;
-  for (let n = 0; n < todo.length; n++) {
-    const i = todo[n];
-    const status = el(`inbox-status-${groupKey}`);
-    if (status) status.textContent = tf(action === 'apply' ? 'toolApplyingProgress' : 'toolSkippingProgress', { current: n + 1, total: todo.length });
-    try {
-      const res = await fetch(`/api/tools/jobs/${i.job_id}/suggestions/${i.id}/${action}`, { method: 'POST' });
-      const s = await res.json();
-      if (!res.ok || s.status === 'error') {
-        failed++;
-        const row = document.querySelector(`.tool-suggestion-row[data-key="${itemKey(i)}"]`);
-        if (row) {
-          row.classList.add('error');
-          row.querySelector('.suggestion-text').insertAdjacentHTML('beforeend', `<div class="inbox-error">${escapeHtml(s.error || s.detail || `HTTP ${res.status}`)}</div>`);
-        }
-      } else {
-        const row = document.querySelector(`.tool-suggestion-row[data-key="${itemKey(i)}"]`);
-        if (row) row.classList.add(action === 'apply' ? 'applied' : 'skipped');
-      }
-    } catch (e) {
-      failed++;
-    }
-    inboxState.selected.delete(itemKey(i));
+  let batchId;
+  try {
+    batchId = await queueActions(action, todo);
+  } catch (e) {
+    inboxState.busyGroup = null;
+    inboxState.results[groupKey] = `${t('toolStatusError')}: ${e.message}`;
+    renderInbox();
+    return;
   }
+  todo.forEach((i) => { inboxState.selected.delete(itemKey(i)); i.queued = true; });
+  renderInbox();
+  const batch = await watchBatch(batchId, async (b) => {
+    inboxState.results[groupKey] = b.done < b.total ? batchProgressText(action, b, false) : ''; // the banner says it goes on in the background
+    await loadInbox(false);
+  }, () => currentArea === 'inbox');
   inboxState.busyGroup = null;
-  inboxState.results[groupKey] = failed ? tf('toolBulkFailed', { count: failed }) : '';
-  // Failed items stay pending on the server and reappear - with their error
-  // kept in the status line of the group.
+  // Failed items drop out of the list (their run keeps the error) - the
+  // group's status line says what went wrong.
+  inboxState.results[groupKey] = batchResultText(batch, true);
   await loadInbox();
 }
 
@@ -1244,12 +1281,22 @@ function renderHealth(data) {
   el('health-grid').innerHTML = HEALTH_METRICS.map((m) => {
     const value = data.metrics[m.key] ?? 0;
     const ignoredCount = (data.ignored || {})[m.key] || 0;
-    return `<div class="health-tile ${value ? 'todo' : 'ok'} ${healthState.open === m.key ? 'open' : ''}">
+    // A run of this tool that is still going or waiting for review replaces
+    // "Fix" - so a tile doesn't invite starting the same fix twice.
+    const pending = (data.pending || {})[m.tool];
+    const pendingHtml = pending
+      ? `<div class="health-pending">${pending.scanning ? t('healthPendingScanning') : tf('healthPendingCount', { n: pending.count })}</div>`
+      : '';
+    const fixBtn = pending
+      ? `<button class="btn secondary health-open-run" type="button" data-job="${pending.job_id}" data-tool="${m.tool}">${pending.scanning ? t('healthOpenRun') : t('healthReviewRun')}</button>`
+      : value ? `<button class="btn secondary health-fix" type="button" data-metric="${m.key}">${t('healthFix')}</button>` : '';
+    return `<div class="health-tile ${value ? 'todo' : 'ok'} ${healthState.open === m.key ? 'open' : ''} ${running ? 'refreshing' : ''}">
       <div class="health-value">${value ? value.toLocaleString() : '✓'}</div>
       <div class="health-label">${t('health_' + m.key)}</div>
       ${ignoredCount ? `<div class="health-ignored-count">${tf('healthIgnoredCount', { n: ignoredCount })}</div>` : ''}
+      ${pendingHtml}
       <div class="health-tile-actions">
-        ${value ? `<button class="btn secondary health-fix" type="button" data-metric="${m.key}">${t('healthFix')}</button>` : ''}
+        ${fixBtn}
         ${value || ignoredCount ? `<button class="btn secondary health-entries" type="button" data-metric="${m.key}">${t('healthEntries')}</button>` : ''}
       </div>
     </div>`;
@@ -1257,6 +1304,9 @@ function renderHealth(data) {
   el('health-grid').querySelectorAll('.health-fix').forEach((b) => b.addEventListener('click', () => {
     const m = HEALTH_METRICS.find((x) => x.key === b.dataset.metric);
     startTool(m.endpoint, toolTitle(m.tool), m.body);
+  }));
+  el('health-grid').querySelectorAll('.health-open-run').forEach((b) => b.addEventListener('click', () => {
+    openToolJob(b.dataset.job, toolTitle(b.dataset.tool));
   }));
   el('health-grid').querySelectorAll('.health-entries').forEach((b) => b.addEventListener('click', () => {
     if (healthState.open === b.dataset.metric) closeHealthDetail();
@@ -1353,10 +1403,16 @@ async function openHealthDetail(metric, scroll = true) {
 
 async function loadHealth() {
   try {
-    const data = await (await fetch('/api/health')).json();
+    let data = await (await fetch('/api/health')).json();
+    // Refresh on its own (no AI, runs in the background) when it was never
+    // computed or something was applied since - e.g. after "Fix" + review.
+    if (currentArea === 'maintain' && !data.running && !data.error && (data.stale || !data.computed_at)) {
+      data = await (await fetch('/api/health/refresh', { method: 'POST' })).json();
+    }
     renderHealth(data);
     clearTimeout(loadHealth.timer);
-    if (data.running && currentArea === 'maintain') loadHealth.timer = setTimeout(loadHealth, 3000);
+    const scanning = Object.values(data.pending || {}).some((p) => p.scanning);
+    if ((data.running || scanning) && currentArea === 'maintain') loadHealth.timer = setTimeout(loadHealth, 3000);
   } catch (e) { /* optional panel */ }
 }
 
@@ -1543,18 +1599,19 @@ el('plan-apply-btn').addEventListener('click', async () => {
   const todo = planState.job.suggestions.filter((s) => s.status === 'pending' && planState.selected.has(s.id));
   if (!todo.length || planState.busy) return;
   planState.busy = true;
-  let failed = 0;
-  for (let n = 0; n < todo.length; n++) {
-    el('plan-status').textContent = tf('toolApplyingProgress', { current: n + 1, total: todo.length });
-    try {
-      const res = await fetch(`/api/tools/jobs/${planState.jobId}/suggestions/${todo[n].id}/apply`, { method: 'POST' });
-      const out = await res.json();
-      if (!res.ok || out.status === 'error') failed++;
-    } catch (e) { failed++; }
-    planState.selected.delete(todo[n].id);
+  const jobId = planState.jobId;
+  let batch = null;
+  try {
+    const batchId = await queueActions('apply', todo.map((s) => ({ job_id: jobId, id: s.id })));
+    todo.forEach((s) => planState.selected.delete(s.id));
+    batch = await watchBatch(batchId, (b) => {
+      if (b.done < b.total) el('plan-status').textContent = batchProgressText('apply', b);
+    }, () => planState.jobId === jobId);
+  } catch (e) {
+    el('plan-status').textContent = `${t('toolStatusError')}: ${e.message}`;
   }
   planState.busy = false;
-  el('plan-status').textContent = failed ? tf('toolBulkFailed', { count: failed }) : t('planAppliedAll');
+  if (batch) el('plan-status').textContent = batch.failed ? batchResultText(batch) : t('planAppliedAll');
   updateInboxBadge();
   pollPlan();
 });
@@ -1611,6 +1668,7 @@ el('tools-back-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
   loadNewRecipesStatus();
+  loadHealth();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
@@ -1748,13 +1806,14 @@ function renderToolSuggestions(job) {
   }
   el('tools-bulk-bar').classList.toggle('hidden', pendingIds.size === 0 && !toolsState.busy);
 
+  const queued = new Set(job.queued_ids || []);
   list.innerHTML = job.suggestions.map((s) => `
-    <div class="tool-suggestion-row ${s.status}" data-suggestion-id="${s.id}">
+    <div class="tool-suggestion-row ${s.status} ${queued.has(s.id) ? 'queued' : ''}" data-suggestion-id="${s.id}">
       ${s.status === 'pending'
-        ? `<input type="checkbox" class="suggestion-check" ${toolsState.selected.has(s.id) ? 'checked' : ''} ${toolsState.busy ? 'disabled' : ''}>`
+        ? `<input type="checkbox" class="suggestion-check" ${toolsState.selected.has(s.id) ? 'checked' : ''} ${toolsState.busy || queued.has(s.id) ? 'disabled' : ''}>`
         : ''}
       <div class="suggestion-text">
-        ${escapeHtml(s.summary)}
+        ${queued.has(s.id) ? `<span class="queued-label">⏳ ${t('queuedLabel')}</span> ` : ''}${escapeHtml(s.summary)}
         ${s.preview ? `<details class="suggestion-preview"><summary>${t('toolShowPreview')}</summary><pre>${escapeHtml(s.preview)}</pre></details>` : ''}
       </div>
       ${s.status === 'pending' ? '' : `<span class="suggestion-status-label">${s.status === 'applied' ? t('toolStatusApplied') : s.status === 'skipped' ? t('toolStatusSkipped') : escapeHtml(s.error || t('toolStatusError'))}</span>`}
@@ -1771,7 +1830,7 @@ function renderToolSuggestions(job) {
     box.addEventListener('change', () => toggle(box.checked));
     // Clicking anywhere on the row toggles it too - except the preview.
     row.addEventListener('click', (e) => {
-      if (toolsState.busy || e.target === box || e.target.closest('details')) return;
+      if (toolsState.busy || box.disabled || e.target === box || e.target.closest('details')) return;
       box.checked = !box.checked;
       toggle(box.checked);
     });
@@ -1796,7 +1855,8 @@ function updateBulkBar() {
 el('tools-select-all').addEventListener('change', (e) => {
   const job = toolsState.job;
   if (!job) return;
-  toolsState.selected = new Set(e.target.checked ? job.suggestions.filter((s) => s.status === 'pending').map((s) => s.id) : []);
+  const queued = new Set(job.queued_ids || []);
+  toolsState.selected = new Set(e.target.checked ? job.suggestions.filter((s) => s.status === 'pending' && !queued.has(s.id)).map((s) => s.id) : []);
   renderToolSuggestions(job);
 });
 
@@ -1811,31 +1871,32 @@ async function runBulkAction(action) {
   if (ids.length === 0) return;
 
   const jobId = toolsState.jobId;
+  const status = el('tools-bulk-status');
+  let batchId;
+  try {
+    batchId = await queueActions(action, ids.map((id) => ({ job_id: jobId, id })));
+  } catch (e) {
+    status.textContent = `${t('toolStatusError')}: ${e.message}`;
+    return;
+  }
+  toolsState.selected.clear();
   toolsState.busy = true;
   renderToolSuggestions(job);
-  const status = el('tools-bulk-status');
-  let failed = 0;
+  let batch = null;
   try {
-    for (let i = 0; i < ids.length; i++) {
-      if (toolsState.jobId !== jobId) return; // user left this run
-      status.textContent = tf(action === 'apply' ? 'toolApplyingProgress' : 'toolSkippingProgress', { current: i + 1, total: ids.length });
-      try {
-        const res = await fetch(`/api/tools/jobs/${jobId}/suggestions/${ids[i]}/${action}`, { method: 'POST' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const s = await res.json();
-        if (s.status === 'error') failed++;
-      } catch (e) {
-        failed++;
-      }
-      toolsState.selected.delete(ids[i]);
-      const res2 = await fetch(`/api/tools/jobs/${jobId}`);
-      if (res2.ok) renderToolSuggestions(await res2.json());
-    }
+    batch = await watchBatch(batchId, async (b) => {
+      if (toolsState.jobId !== jobId) return;
+      if (b.done < b.total) status.textContent = batchProgressText(action, b);
+      const res = await fetch(`/api/tools/jobs/${jobId}`);
+      if (res.ok) renderToolSuggestions(await res.json());
+    }, () => toolsState.jobId === jobId); // user left this run - it goes on in the background
   } finally {
     toolsState.busy = false;
     updateInboxBadge();
-    status.textContent = failed ? tf('toolBulkFailed', { count: failed }) : '';
-    if (toolsState.job) renderToolSuggestions(toolsState.job);
+    if (toolsState.jobId === jobId) {
+      status.textContent = batchResultText(batch);
+      if (toolsState.job) renderToolSuggestions(toolsState.job);
+    }
   }
 }
 
