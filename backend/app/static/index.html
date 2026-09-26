@@ -30,7 +30,7 @@
         <div class="tool-card tool-card-featured">
           <div class="tool-card-icon">🆕</div>
           <h3 data-i18n="toolNewRecipesTitle">Process new recipes</h3>
-          <p data-i18n="toolNewRecipesDesc">For recipes added since the last run (via Tandoor or this app): translates them automatically, then suggests matching their ingredients, units and tags to existing ones, filling in ingredient details, and adding tags.</p>
+          <p data-i18n="toolNewRecipesDesc">For recipes added since the last run (via Tandoor or this app): translates them automatically, then suggests revising their structure (steps, ingredients per step, servings, times), matching their ingredients, units and tags to existing ones, filling in ingredient details, and adding tags.</p>
           <p id="new-recipes-status" class="new-recipes-status"></p>
           <p id="new-recipes-auto" class="new-recipes-auto hidden"></p>
           <div id="new-recipes-open-jobs" class="new-recipes-open-jobs"></div>
@@ -84,6 +84,12 @@
             <h3 data-i18n="toolRecipesTranslateTitle">Recipes: translate</h3>
             <p data-i18n="toolRecipesTranslateDesc">Translates existing recipes (title, description, steps, ingredient notes) into your output language.</p>
             <button class="btn tool-start-btn" data-tool="recipes_translate" data-endpoint="/api/tools/recipes/translate" data-i18n="toolStartBtn">Start</button>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-icon">🧩</div>
+            <h3 data-i18n="toolRecipesRestructureTitle">Recipes: revise structure</h3>
+            <p data-i18n="toolRecipesRestructureDesc">Finds recipes with all ingredients in step 1 or one long block of text, and suggests splitting them into steps, assigning ingredients to steps, and filling in servings and times.</p>
+            <button class="btn tool-start-btn" data-tool="recipes_restructure" data-endpoint="/api/tools/recipes/restructure" data-i18n="toolStartBtn">Start</button>
           </div>
         </div>
       </div>
