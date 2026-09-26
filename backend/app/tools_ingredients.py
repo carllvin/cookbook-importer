@@ -5,7 +5,7 @@ import logging
 import uuid
 
 from . import llm_provider, nutrition_properties, tandoor_client, tool_jobs
-from .config import settings
+from .config import get_language_code, settings
 from .schemas import ToolSuggestion
 from .tandoor_helpers import chunked, delete_entity, entity_exists, find_recipes_by_filter, format_cost_estimate, minimal_ref, resolve_name_collisions, validate_actions
 
@@ -232,9 +232,16 @@ object {"categories": [{"id": integer, "name": string}, ...], "ingredients":
 
 For every ingredient, answer:
 - "plural_name" (only if needs_plural): the plural of the name in
-  {language}, e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier". Use null if the
-  plural is spelled exactly like the singular (e.g. "Zucker", "Messer") or
-  if the ingredient isn't normally counted (e.g. "Mehl", "Salz", "Milch").
+  {language} - but ONLY for things a recipe counts in pieces ("2 Tomaten",
+  "3 Eier", "2 rote Zwiebeln", "4 Knoblauchzehen", "2 Hähnchenbrustfilets"),
+  e.g. "Tomate" -> "Tomaten", "Ei" -> "Eier", "Rote Zwiebel" -> "Rote
+  Zwiebeln". Use null for everything measured by weight, volume or spoons
+  instead of counted: pastes, sauces, oils, vinegars, spices, dried herbs,
+  flour, sugar, salt, liquids, dairy, grains, minced meat, jams, powders
+  (e.g. "Koreanische Chilipaste", "Sojasauce", "Olivenöl", "Mehl",
+  "Zimt", "Milch", "Reis", "Hackfleisch"). Also null if the plural is
+  spelled exactly like the singular (e.g. "Zucker", "Messer"). When in
+  doubt, use null - a missing plural is harmless, a nonsensical one isn't.
 - "nutrition" (only if needs_nutrition): rough typical values for the raw /
   commonly used ingredient, as {"basis": "g" or "ml", "energy_kcal": number,
   "protein_g": number, "fat_g": number, "carbs_g": number} per 100 g - or
@@ -281,6 +288,37 @@ def fetch_supermarket_categories(client):
 
 def _same_word(a, b):
     return (a or "").strip().lower() == (b or "").strip().lower()
+
+
+# German word endings of ingredients that are measured, never counted - a
+# safety net for plurals the AI still suggests ("Chilipaste" -> "Chilipasten").
+# Checked against the last word of the name, so "Koreanische Chilipaste" and
+# "Sesamöl" match but "Wassermelone" doesn't.
+_GERMAN_MASS_ENDINGS = (
+    "paste", "pasta", "soße", "sosse", "sauce", "öl", "essig", "mehl", "grieß", "gries",
+    "stärke", "pulver", "salz", "zucker", "sirup", "honig", "dicksaft", "milch", "sahne",
+    "rahm", "schmand", "joghurt", "jogurt", "quark", "butter", "schmalz", "margarine",
+    "creme", "crème", "brühe", "fond", "saft", "wein", "bier", "likör", "wasser",
+    "senf", "ketchup", "mayonnaise", "pesto", "dressing", "marmelade", "konfitüre",
+    "gelee", "mus", "püree", "mark", "extrakt", "aroma", "hefe", "gelatine", "natron",
+    "reis", "hack", "hackfleisch", "flocken", "gewürz", "zimt", "pfeffer", "curry",
+    "kurkuma", "muskat", "oregano", "thymian", "rosmarin", "basilikum", "petersilie",
+    "schnittlauch", "dill", "kakao", "kaffee", "tee", "schokolade", "kuvertüre",
+    "sesam", "mohn", "couscous", "bulgur", "quinoa", "polenta", "spinat", "rucola",
+)
+
+
+def plausible_plural(name, plural) -> str:
+    """The suggested plural, or "" if it adds nothing (same as the singular)
+    or makes no sense (German mass/uncountable ingredient)."""
+    plural = plural.strip() if isinstance(plural, str) else ""
+    if not plural or _same_word(plural, name):
+        return ""
+    if get_language_code(settings.output_language) == "de":
+        last = (name or "").strip().split()[-1].lower() if (name or "").strip() else ""
+        if last.endswith(_GERMAN_MASS_ENDINGS):
+            return ""
+    return plural
 
 
 def _clean_nutrition(nutrition):
@@ -361,10 +399,7 @@ def enrich_suggestions(job, targets, categories) -> list[ToolSuggestion]:
             target = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
             if target is None:
                 continue
-            plural = answer.get("plural_name") if target["needs_plural"] else None
-            plural = plural.strip() if isinstance(plural, str) else ""
-            if _same_word(plural, target["name"]):
-                plural = ""  # plural == singular: nothing to add
+            plural = plausible_plural(target["name"], answer.get("plural_name") if target["needs_plural"] else None)
             nutrition = _clean_nutrition(answer.get("nutrition")) if target["needs_nutrition"] else None
             # Only accept ids of categories that actually exist.
             category = categories_by_id.get(answer.get("category_id")) if target["needs_category"] else None
