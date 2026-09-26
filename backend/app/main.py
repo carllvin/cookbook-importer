@@ -8,24 +8,39 @@ import os
 import shutil
 import threading
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, import_matching, jobs, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import image_gen, import_matching, jobs, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
 from .image_processor import SUPPORTED_IMAGE_EXTENSIONS, process_images
 from .pdf_processor import process_pdf
+from .url_processor import UrlImportError, process_url, validate_url
 from .schemas import ExtractedRecipe
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tandoor-helper")
 
 app = FastAPI(title="Tandoor Helper")
+
+
+@app.middleware("http")
+async def revalidate_static_files(request, call_next):
+    """The frontend (index.html, app.js, i18n.js, style.css) must always be
+    revalidated: without this, a browser may keep an old i18n.js next to a
+    new index.html after an update and show raw keys like
+    'toolRecipesRestructureTitle'. StaticFiles answers revalidations with
+    304 Not Modified (ETag), so this costs almost nothing."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -113,6 +128,10 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
             job.progress_label = "Running OCR on uploaded photo(s) …"
             jobs.save_job(job)
             result = process_images(source_paths, images_dir)
+        elif doc_type == "url":
+            job.progress_label = "Loading the recipe page …"
+            jobs.save_job(job)
+            result = process_url(source_paths[0], images_dir)
         else:
             raise ValueError(f"Unknown document type: {doc_type}")
 
@@ -144,14 +163,20 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
         job.token_usage.add(usage)
         jobs.match_images_to_recipes(job)
 
-        job.progress_label = "Determining cookbook title …"
-        jobs.save_job(job)
-        guess, title_usage = guess_cookbook_title(
-            result["pages"], job.filename, metadata_title=result.get("metadata_title", "")
-        )
-        job.token_usage.add(title_usage)
-        job.suggested_cookbook_name = guess
-        job.cookbook_name = guess
+        if doc_type == "url":
+            # A single web recipe doesn't belong to a cookbook by default -
+            # the name field stays empty (the user can still type one).
+            job.suggested_cookbook_name = None
+            job.cookbook_name = None
+        else:
+            job.progress_label = "Determining cookbook title …"
+            jobs.save_job(job)
+            guess, title_usage = guess_cookbook_title(
+                result["pages"], job.filename, metadata_title=result.get("metadata_title", "")
+            )
+            job.token_usage.add(title_usage)
+            job.suggested_cookbook_name = guess
+            job.cookbook_name = guess
 
         job.progress_label = "Checking for duplicates already in Tandoor …"
         jobs.save_job(job)
@@ -223,6 +248,21 @@ async def upload_files(files: list[UploadFile] = File(...)):
     jobs.save_job(job)
     threading.Thread(target=_run_extraction, args=(job.id, source_paths, doc_type, settings.force_ocr), daemon=True).start()
 
+    return {"job_id": job.id}
+
+
+@app.post("/api/import-url")
+async def import_url(body: dict = Body(...)):
+    """Imports a single recipe from a web page - same extraction, review
+    and import flow as an uploaded document (see url_processor)."""
+    try:
+        url = validate_url(body.get("url", ""))
+    except UrlImportError as exc:
+        raise HTTPException(400, str(exc))
+    job = jobs.create_job(urlparse(url).netloc or url)
+    os.makedirs(_job_dir(job.id), exist_ok=True)
+    jobs.save_job(job)
+    threading.Thread(target=_run_extraction, args=(job.id, [url], "url"), daemon=True).start()
     return {"job_id": job.id}
 
 
@@ -359,7 +399,18 @@ async def import_selected(job_id: str, body: dict = Body(default={})):
             })
         jobs.save_job(job)
 
-    return {"results": results, "cookbook_name": cookbook_name or None, "cookbook_warning": cookbook_warning}
+    # Straight into post-processing (nutrition, conversions, matching, tags
+    # ...) - suggestions then wait under Tools. Never blocks the import.
+    post_processing_job_id = None
+    imported_ids = [r["tandoor_recipe_id"] for r in results if r["status"] == "imported" and r["tandoor_recipe_id"]]
+    if imported_ids:
+        try:
+            post_processing_job_id = await asyncio.to_thread(tools_new_recipes.start_after_import, imported_ids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not start post-processing after import: %s", exc)
+
+    return {"results": results, "cookbook_name": cookbook_name or None, "cookbook_warning": cookbook_warning,
+            "post_processing_job_id": post_processing_job_id}
 
 
 @app.post("/api/jobs/{job_id}/recipes/{recipe_id}/undo-import")
@@ -481,6 +532,7 @@ _TOOL_SCANS = {
     "new_recipes": tools_new_recipes.run_scan,
     "conversions": tools_conversions.run_scan,
     "recipes_restructure": recipe_restructure.run_scan,
+    "meal_plan": tools_meal_plan.run_scan,
 }
 
 # tool name -> the apply_suggestion(job_id, suggestion_id) function for that tool
@@ -497,6 +549,7 @@ _TOOL_APPLY = {
     "new_recipes": tools_new_recipes.apply_suggestion,
     "conversions": tools_conversions.apply_suggestion,
     "recipes_restructure": recipe_restructure.apply_suggestion,
+    "meal_plan": tools_meal_plan.apply_suggestion,
 }
 
 
@@ -551,6 +604,33 @@ async def start_recipes_translate():
     return _start_tool_job("recipes_translate")
 
 
+@app.get("/api/tools/meal-plan/options")
+async def meal_plan_options():
+    try:
+        return await asyncio.to_thread(tools_meal_plan.options)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc), "meal_types": []}, status_code=200)
+
+
+@app.post("/api/tools/meal-plan")
+async def start_meal_plan(body: dict = Body(...)):
+    meal_type = body.get("meal_type") or {}
+    if not meal_type.get("id"):
+        raise HTTPException(400, "Please choose a meal type.")
+    job = tool_jobs.create_tool_job("meal_plan")
+    job.meta["params"] = {
+        "start_date": body.get("start_date"),
+        "days": body.get("days") or 7,
+        "meal_type": {"id": meal_type["id"], "name": meal_type.get("name", "")},
+        "servings": body.get("servings") or 2,
+        "wishes": (body.get("wishes") or "")[:500],
+        "add_to_shopping": bool(body.get("add_to_shopping")),
+    }
+    tool_jobs.save_tool_job(job)
+    threading.Thread(target=tools_meal_plan.run_scan, args=(job.id,), daemon=True).start()
+    return {"job_id": job.id}
+
+
 @app.post("/api/tools/recipes/restructure")
 async def start_recipes_restructure():
     return _start_tool_job("recipes_restructure")
@@ -574,6 +654,22 @@ async def new_recipes_status():
 @app.post("/api/tools/new-recipes/process")
 async def start_new_recipes():
     return _start_tool_job("new_recipes")
+
+
+@app.get("/api/tools/jobs")
+async def list_open_tool_jobs():
+    """Runs that still have suggestions to review (newest first) - so they
+    can be reopened after a reload or a container restart."""
+    open_jobs = [
+        job for job in tool_jobs.list_all_tool_jobs()
+        if job.status in ("ready", "cancelled", "scanning")
+        and (job.status == "scanning" or any(s.status == "pending" for s in job.suggestions))
+    ]
+    return [
+        {"id": job.id, "tool": job.tool, "status": job.status, "created_at": job.created_at,
+         "pending": sum(1 for s in job.suggestions if s.status == "pending")}
+        for job in sorted(open_jobs, key=lambda j: -j.created_at)
+    ]
 
 
 @app.get("/api/tools/jobs/{job_id}")
@@ -659,6 +755,7 @@ async def _cleanup_loop() -> None:
     while True:
         try:
             jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+            tool_jobs.cleanup_old_tool_jobs(settings.job_retention_hours)
         except Exception:  # noqa: BLE001
             log.exception("Background cleanup failed")
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
@@ -669,6 +766,10 @@ async def on_startup() -> None:
     # Run once immediately (covers jobs left over from a previous container run),
     # then keep running in the background for as long as the app is up.
     jobs.cleanup_old_jobs(settings.data_dir, settings.job_retention_hours)
+    loaded = tool_jobs.load_tool_jobs()
+    if loaded:
+        log.info("Restored %d tool run(s) from disk", loaded)
+    tool_jobs.cleanup_old_tool_jobs(settings.job_retention_hours)
     asyncio.create_task(_cleanup_loop())
     if settings.auto_process_interval_hours > 0:
         asyncio.create_task(tools_new_recipes.auto_run_loop())

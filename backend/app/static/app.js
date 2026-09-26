@@ -204,6 +204,40 @@ async function uploadFiles(files) {
   }
 }
 
+// Single recipe from a web page: same processing / review / import flow.
+el('url-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = el('url-input').value.trim();
+  if (!url) return;
+  el('upload-error').classList.add('hidden');
+  requestNotificationPermission();
+  el('upload-screen').classList.add('hidden');
+  el('processing-screen').classList.remove('hidden');
+  el('progress-track').classList.add('hidden');
+  el('usage-badge').classList.add('hidden');
+  el('processing-text').textContent = t('urlImportLoading');
+  try {
+    const res = await fetch('/api/import-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `${t('uploadFailedPrefix')} (${res.status})`);
+    }
+    const data = await res.json();
+    state.jobId = data.job_id;
+    setJobUrl(data.job_id);
+    el('url-input').value = '';
+    pollJob();
+  } catch (err) {
+    el('processing-screen').classList.add('hidden');
+    el('upload-screen').classList.remove('hidden');
+    showUploadError(err.message);
+  }
+});
+
 function showUploadError(msg) {
   const box = el('upload-error');
   box.textContent = msg;
@@ -826,7 +860,7 @@ async function runImport(recipeIds) {
       r.import_error = result.error;
       r.tandoor_recipe_id = result.tandoor_recipe_id;
     });
-    showImportSummary(data.results, data.cookbook_name, data.cookbook_warning);
+    showImportSummary(data.results, data.cookbook_name, data.cookbook_warning, data.post_processing_job_id);
   } catch (e) {
     alert(`${t('importFailedAlertPrefix')} ${e.message}`);
   } finally {
@@ -848,7 +882,7 @@ el('retry-failed-btn').addEventListener('click', () => {
   runImport(failedIds);
 });
 
-function showImportSummary(results, cookbookName, cookbookWarning) {
+function showImportSummary(results, cookbookName, cookbookWarning, postProcessingJobId) {
   const total = results.length;
   const ok = results.filter((r) => r.status === 'imported').length;
   const failed = total - ok;
@@ -881,6 +915,9 @@ function showImportSummary(results, cookbookName, cookbookWarning) {
   }
   if (ok > 0) {
     lines.push(t('modalOpenInListHint'));
+  }
+  if (postProcessingJobId) {
+    lines.push(t('modalPostProcessingLine'));
   }
   body.textContent = lines.join('\n');
 
@@ -946,7 +983,85 @@ el('tools-nav-btn').addEventListener('click', () => {
   el('tools-cards-view').classList.remove('hidden');
   el('tools-run-view').classList.add('hidden');
   loadNewRecipesStatus();
+  loadOpenRuns();
+  loadMealPlanOptions();
 });
+
+// ---------- Meal plan ----------
+
+function nextMonday() {
+  const d = new Date();
+  d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7));
+  return d.toISOString().slice(0, 10);
+}
+
+async function loadMealPlanOptions() {
+  if (!el('mp-start').value) el('mp-start').value = nextMonday();
+  const select = el('mp-meal');
+  const hint = el('mp-hint');
+  try {
+    const res = await fetch('/api/tools/meal-plan/options');
+    const data = await res.json();
+    const previous = select.value;
+    select.innerHTML = data.meal_types.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    if (previous) select.value = previous;
+    // Default to dinner if there is one.
+    if (!previous) {
+      const dinner = data.meal_types.find((m) => /abend|dinner|dîner|cena/i.test(m.name));
+      if (dinner) select.value = dinner.id;
+    }
+    const none = data.meal_types.length === 0;
+    hint.textContent = none ? t('mealPlanNoMealTypes') : '';
+    hint.classList.toggle('hidden', !none);
+    el('mp-start-btn').disabled = none;
+  } catch (e) {
+    hint.textContent = `${t('toolNewRecipesStatusFailed')}: ${e.message}`;
+    hint.classList.remove('hidden');
+  }
+}
+
+el('meal-plan-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const select = el('mp-meal');
+  startTool('/api/tools/meal-plan', t('toolMealPlanTitle'), {
+    start_date: el('mp-start').value,
+    days: Number(el('mp-days').value),
+    meal_type: { id: Number(select.value), name: select.options[select.selectedIndex]?.textContent || '' },
+    servings: Number(el('mp-servings').value),
+    wishes: el('mp-wishes').value,
+    add_to_shopping: el('mp-shopping').checked,
+  });
+});
+
+// Runs of the other tools that still have suggestions to review - they're
+// saved on the server, so they can be reopened after a reload or restart.
+// ("Process new recipes" lists its own runs in its card.)
+async function loadOpenRuns() {
+  const box = el('tools-open-runs');
+  try {
+    const res = await fetch('/api/tools/jobs');
+    const runs = (await res.json()).filter((r) => r.tool !== 'new_recipes');
+    if (!runs.length) { box.classList.add('hidden'); return; }
+    const titleOf = (tool) => {
+      const card = document.querySelector(`.tool-start-btn[data-tool="${tool}"]`);
+      return card ? card.closest('.tool-card').querySelector('h3').textContent : tool;
+    };
+    el('tools-open-runs-list').innerHTML = runs.map((r) => {
+      const when = new Date(r.created_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      const label = r.status === 'scanning'
+        ? tf('toolOpenRunRunning', { tool: titleOf(r.tool), when })
+        : tf('toolOpenRunPending', { tool: titleOf(r.tool), when, count: r.pending });
+      return `<div class="new-recipes-open-job"><span>${escapeHtml(label)}</span>
+        <button class="btn secondary" type="button" data-job-id="${r.id}" data-tool="${r.tool}">${t('toolNewRecipesOpenJob')}</button></div>`;
+    }).join('');
+    el('tools-open-runs-list').querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => openToolJob(b.dataset.jobId, titleOf(b.dataset.tool)));
+    });
+    box.classList.remove('hidden');
+  } catch (e) {
+    box.classList.add('hidden');
+  }
+}
 
 async function loadNewRecipesStatus() {
   const label = el('new-recipes-status');
@@ -1000,6 +1115,7 @@ el('tools-back-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
   loadNewRecipesStatus();
+  loadOpenRuns();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
@@ -1009,10 +1125,12 @@ document.querySelectorAll('.tool-start-btn').forEach((btn) => {
   });
 });
 
-async function startTool(endpoint, title) {
+async function startTool(endpoint, title, body) {
   resetToolRunView(title);
   try {
-    const res = await fetch(endpoint, { method: 'POST' });
+    const res = await fetch(endpoint, body
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     toolsState.jobId = data.job_id;

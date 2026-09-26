@@ -783,3 +783,24 @@ a { color: inherit; }
 .ing-match.matched:hover { background: rgba(185,133,47,0.15); }
 .ing-match.new { color: #8f9689; border-color: #4a5147; }
 .ing-match-summary { font-size: 0.8rem; color: #8f9689; margin: -4px 0 10px; }
+
+.tools-open-runs { margin-bottom: 16px; }
+.tools-open-runs h3 { margin: 0 0 8px; font-size: 1rem; }
+
+.url-form { width: min(560px, 90vw); margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.url-form-or { font-size: 0.85rem; color: #8f9689; text-align: center; }
+.url-form-row { display: flex; gap: 8px; }
+.url-form-row input {
+  flex: 1; min-width: 0; background: rgba(239,233,218,0.05); border: 1px solid #2a2f2a;
+  border-radius: var(--radius); color: var(--paper); padding: 10px 12px; font-size: 0.95rem;
+}
+
+.meal-plan-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; align-items: end; }
+.meal-plan-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: #8f9689; }
+.meal-plan-form .mp-wide { grid-column: 1 / -1; }
+.meal-plan-form .mp-check { flex-direction: row; align-items: center; gap: 8px; color: var(--paper); font-size: 0.85rem; }
+.meal-plan-form input, .meal-plan-form select {
+  background: rgba(239,233,218,0.05); border: 1px solid #2a2f2a; border-radius: var(--radius);
+  color: var(--paper); padding: 7px 8px; font-size: 0.88rem; color-scheme: dark;
+}
+.meal-plan-form .btn { justify-self: start; }
