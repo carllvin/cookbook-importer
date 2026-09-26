@@ -494,8 +494,9 @@ def run_scan(job_id: str) -> None:
                     )
                 if not job.cancel_requested:
                     all_tags = tandoor_client.fetch_all_items(client, "keyword")
+                    food_names = tools_tags.food_name_set(client)
                     suggestions += tools_tags.suggest_tags_suggestions(
-                        job, recipes, tools_tags.tag_vocabulary(all_tags, recipes)
+                        job, recipes, tools_tags.tag_vocabulary(all_tags, recipes, food_names), food_names
                     )
 
             job.suggestions = suggestions

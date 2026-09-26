@@ -395,25 +395,33 @@ def apply_season_suggestion(job_id: str, suggestion_id: str) -> ToolSuggestion:
     return suggestion
 
 
-SUGGEST_MORE_SYSTEM_PROMPT = """You suggest additional tags for under-tagged
-recipes in a database whose target language is {language}. You will receive
-a JSON object: {"vocabulary": [string], "recipes": [{"id": integer,
-"title": string, "description": string|null, "ingredients": [string],
-"existing_tags": [string]}, ...]}.
+SUGGEST_MORE_SYSTEM_PROMPT = """You suggest additional DESCRIPTIVE tags for recipes
+in a database whose target language is {language}. You will receive a JSON
+object: {"vocabulary": [string], "recipes": [{"id": integer, "title": string,
+"description": string|null, "ingredients": [string], "existing_tags": [string]}, ...]}.
 
-"vocabulary" is the list of tags already used in the collection - STRONGLY
-prefer reusing one of these over inventing a new tag, if it genuinely fits;
-only propose a new one when nothing in the vocabulary applies.
-"existing_tags" are tags a recipe already has (don't repeat these).
+Good tags describe the dish, e.g.:
+- cuisine / origin: amerikanisch, italienisch, asiatisch
+- taste / character: süß, herzhaft, scharf, fruchtig
+- cooking method: backen, grillen, schmoren, ohne Kochen
+- course / meal: Frühstück, Hauptgericht, Beilage, Dessert, Snack
+- diet: vegetarisch, vegan, glutenfrei
+- occasion / effort: Party, Weihnachten, schnell, einfach, Meal Prep
 
-For each recipe, suggest at most 3 tags, each a short {language} word or
-phrase in the same style as the vocabulary (cuisine, meal type, diet, main
-ingredient, occasion, season - whatever is genuinely obvious from the
-recipe, not a stretch).
+NEVER suggest an ingredient as a tag (no "Blumenkohl", "Hähnchen",
+"Schokolade") - ingredients are already searchable in the recipe itself.
+
+"vocabulary" lists tags already used in the collection: reuse one of those
+whenever it fits (same spelling). You MAY suggest a new tag when a clearly
+useful descriptive tag is missing from the vocabulary - in the same style
+(short, {language}, lowercase adjectives / capitalized nouns as usual in
+{language}). Don't repeat "existing_tags".
+
+For each recipe suggest at most 3 tags that are genuinely obvious, not a
+stretch; an empty list is fine.
 
 Respond with ONLY a JSON array (no explanation, no markdown fence), one
-element per recipe: {"id": <id>, "tags": [string, ...]}. Use an empty
-"tags" list if nothing fits.
+element per recipe: {"id": <id>, "tags": [string, ...]}.
 """
 
 MIN_TAGS_DEFAULT = 5
@@ -444,22 +452,45 @@ def _compact_recipe(recipe):
     }
 
 
-def tag_vocabulary(all_tags, recipes) -> list[str]:
+def tag_vocabulary(all_tags, recipes, food_names=frozenset()) -> list[str]:
     """Existing tag names, most-used first, so the MAX_VOCABULARY cap keeps
-    the ones that matter instead of whatever sorts first alphabetically."""
+    the ones that matter instead of whatever sorts first alphabetically.
+    Tags that are just an ingredient's name ("Blumenkohl") are left out, so
+    they aren't offered for reuse."""
     usage = {}
     for recipe in recipes:
         for kw in recipe.get("keywords", []):
             usage[kw.get("name")] = usage.get(kw.get("name"), 0) + 1
-    return sorted((t["name"] for t in all_tags), key=lambda n: -usage.get(n, 0))[:MAX_VOCABULARY]
+    names = [t["name"] for t in all_tags if t["name"].strip().casefold() not in food_names]
+    return sorted(names, key=lambda n: -usage.get(n, 0))[:MAX_VOCABULARY]
 
 
-def suggest_tags_suggestions(job, recipes, vocabulary) -> list[ToolSuggestion]:
+def food_name_set(client) -> set[str]:
+    """Lower-case names (and plurals) of all ingredients, to keep ingredient
+    names out of tag suggestions."""
+    names = set()
+    for food in tandoor_client.fetch_all_items(client, "food"):
+        names.add(food["name"].strip().casefold())
+    return names
+
+
+def _is_ingredient_tag(tag, recipe_ingredients, food_names) -> bool:
+    """True for a tag that is an ingredient ("Blumenkohl") or built on one of
+    this recipe's ingredients ("Blumenkohl-Curry")."""
+    low = tag.strip().casefold()
+    if low in food_names:
+        return True
+    return any(len(name) >= 4 and name in low for name in recipe_ingredients)
+
+
+def suggest_tags_suggestions(job, recipes, vocabulary, food_names=frozenset()) -> list[ToolSuggestion]:
     """Batched "suggest more tags" for the given recipes. Adds token usage to
     `job`, stops early on cancel. Shared by the "Tags: suggest more" tool and
     the new-recipes workflow."""
     system_prompt = SUGGEST_MORE_SYSTEM_PROMPT.replace("{language}", settings.output_language)
     by_id = {r["id"]: r for r in recipes}
+    # casefold, not lower: "SÜSS" must match an existing "süß"
+    known = {v.strip().casefold(): v for v in vocabulary}
     suggestions = []
     batches = list(chunked(recipes, SUGGEST_MORE_BATCH_SIZE))
     for i, batch in enumerate(batches, 1):
@@ -481,14 +512,19 @@ def suggest_tags_suggestions(job, recipes, vocabulary) -> list[ToolSuggestion]:
             recipe = by_id.get(answer.get("id")) if isinstance(answer, dict) else None
             if recipe is None:
                 continue
-            existing = {kw["name"].strip().lower() for kw in recipe.get("keywords", [])}
+            existing = {kw["name"].strip().casefold() for kw in recipe.get("keywords", [])}
+            ingredients = {n.casefold() for n in _compact_recipe(recipe)["ingredients"]}
             tags = [t.strip() for t in answer.get("tags") or [] if isinstance(t, str) and t.strip()]
-            tags = [t for t in dict.fromkeys(tags) if t.lower() not in existing][:3]
+            # Reuse the vocabulary's exact spelling when the AI changed case.
+            tags = [known.get(t.casefold(), t) for t in tags]
+            tags = [t for t in dict.fromkeys(tags)
+                    if t.casefold() not in existing and not _is_ingredient_tag(t, ingredients, food_names)][:3]
             if not tags:
                 continue
+            labels = ", ".join(t if t.casefold() in known else f"{t} (new)" for t in tags)
             suggestions.append(ToolSuggestion(
                 id=uuid.uuid4().hex[:10], kind="suggest_tags",
-                summary=f"add {tags} to {recipe.get('name', '')!r}",
+                summary=f"add [{labels}] to {recipe.get('name', '')!r}",
                 detail={"recipe_id": recipe["id"], "tags": tags},
             ))
         job.progress_current = min(i * SUGGEST_MORE_BATCH_SIZE, len(recipes))
@@ -513,12 +549,20 @@ def run_suggest_more_scan(job_id: str) -> None:
             job.progress_label = "Scanning every recipe's full detail..."
             tool_jobs.save_tool_job(job)
             recipes = fetch_all_recipes_full(client)
-            under_tagged = [r for r in recipes if len(r.get("keywords", [])) < MIN_TAGS_DEFAULT]
+            food_names = food_name_set(client)
+            # Only descriptive tags count - five ingredient tags ("Blumenkohl")
+            # still leave a recipe under-tagged.
+            under_tagged = [
+                r for r in recipes
+                if sum(1 for kw in r.get("keywords", []) if kw["name"].strip().casefold() not in food_names) < MIN_TAGS_DEFAULT
+            ]
             job.progress_total = len(under_tagged)
             job.cost_estimate = format_cost_estimate(len(under_tagged), "batched_suggest_tags")
             tool_jobs.save_tool_job(job)
 
-            job.suggestions = suggest_tags_suggestions(job, under_tagged, tag_vocabulary(all_tags, recipes))
+            job.suggestions = suggest_tags_suggestions(
+                job, under_tagged, tag_vocabulary(all_tags, recipes, food_names), food_names
+            )
             job.status = "cancelled" if job.cancel_requested else "ready"
             job.progress_label = None
             tool_jobs.save_tool_job(job)
