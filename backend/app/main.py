@@ -495,6 +495,7 @@ async def import_selected(job_id: str, body: dict = Body(default={})):
     post_processing_job_id = None
     imported_ids = [r["tandoor_recipe_id"] for r in results if r["status"] == "imported" and r["tandoor_recipe_id"]]
     if imported_ids:
+        health.mark_changed()
         try:
             post_processing_job_id = await asyncio.to_thread(tools_new_recipes.start_after_import, imported_ids)
         except Exception as exc:  # noqa: BLE001
@@ -814,6 +815,8 @@ async def apply_tool_suggestion(job_id: str, suggestion_id: str):
     if apply_fn is None:
         raise HTTPException(400, f"Unknown tool: {job.tool}")
     suggestion = apply_fn(job_id, suggestion_id)
+    if suggestion.status == "applied":
+        health.mark_changed()
     return suggestion.model_dump()
 
 

@@ -912,6 +912,8 @@ a { color: inherit; }
 .health-fix, .health-entries { padding: 4px 10px; font-size: 0.75rem; }
 .health-tile-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .health-ignored-count { font-size: 0.72rem; color: #8a9186; }
+.health-pending { font-size: 0.75rem; color: var(--gold); }
+.health-tile.refreshing { opacity: 0.55; }
 .health-tile.open { border-color: var(--gold); }
 .health-detail { margin-top: 12px; border: 1px solid #2a2f2a; border-radius: var(--radius); padding: 12px; }
 .health-detail-head { display: flex; align-items: center; gap: 10px; }

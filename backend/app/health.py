@@ -12,13 +12,15 @@ import os
 import threading
 import time
 
-from . import duplicates, ignored, recipe_restructure, tandoor_client, tools_conversions, tools_ingredients, tools_recipes, tools_tags
+from . import duplicates, ignored, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_ingredients, tools_recipes, tools_tags
 from .config import get_language_code, settings
 from .tandoor_helpers import fetch_all_recipes_full
 
 log = logging.getLogger("tandoor-helper")
 
-_state = {"running": False, "error": None}
+# changed_at: when a suggestion was last applied or recipes were imported -
+# a cached result computed before that is stale and the page refreshes it.
+_state = {"running": False, "error": None, "changed_at": 0.0}
 _lock = threading.Lock()
 
 
@@ -42,8 +44,30 @@ def cached() -> dict:
     for metric, items in (data.get("items") or {}).items():
         skip = set(ignored_all.get(metric, {}))
         metrics[metric] = sum(1 for item in items if item["key"] not in skip)
-    return {"computed_at": data.get("computed_at"), "metrics": metrics, "ignored": ignored_counts,
+    computed_at = data.get("computed_at")
+    return {"computed_at": computed_at, "metrics": metrics, "ignored": ignored_counts,
+            "stale": bool(computed_at) and _state["changed_at"] > computed_at,
+            "pending": _pending_by_tool(),
             "running": _state["running"], "error": _state["error"]}
+
+
+def mark_changed() -> None:
+    """Called after something changed the collection (applied suggestion,
+    import) - the overview then counts as stale."""
+    _state["changed_at"] = time.time()
+
+
+def _pending_by_tool() -> dict:
+    """Per tool, the newest run that is still scanning or has suggestions
+    waiting for review: {"job_id", "scanning", "count"} - so a tile can show
+    that its fix is already under way."""
+    result = {}
+    for job in sorted(tool_jobs.list_all_tool_jobs(), key=lambda j: j.created_at):
+        count = sum(1 for s in job.suggestions if s.status == "pending")
+        scanning = job.status == "scanning"
+        if scanning or count:
+            result[job.tool] = {"job_id": job.id, "scanning": scanning, "count": count}
+    return result
 
 
 def items(metric: str) -> dict:
@@ -70,6 +94,7 @@ def start_refresh() -> bool:
 
 
 def _compute() -> None:
+    started = time.time()  # changes during the run make the result stale again
     try:
         with tandoor_client.get_client() as client:
             recipes = fetch_all_recipes_full(client)
@@ -121,7 +146,7 @@ def _compute() -> None:
         os.makedirs(settings.data_dir, exist_ok=True)
         tmp = _path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"computed_at": time.time(), "metrics": metrics, "items": item_lists}, f, ensure_ascii=False)
+            json.dump({"computed_at": started, "metrics": metrics, "items": item_lists}, f, ensure_ascii=False)
         os.replace(tmp, _path())
     except Exception as exc:  # noqa: BLE001
         log.exception("Health overview failed")

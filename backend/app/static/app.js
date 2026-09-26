@@ -1244,12 +1244,22 @@ function renderHealth(data) {
   el('health-grid').innerHTML = HEALTH_METRICS.map((m) => {
     const value = data.metrics[m.key] ?? 0;
     const ignoredCount = (data.ignored || {})[m.key] || 0;
-    return `<div class="health-tile ${value ? 'todo' : 'ok'} ${healthState.open === m.key ? 'open' : ''}">
+    // A run of this tool that is still going or waiting for review replaces
+    // "Fix" - so a tile doesn't invite starting the same fix twice.
+    const pending = (data.pending || {})[m.tool];
+    const pendingHtml = pending
+      ? `<div class="health-pending">${pending.scanning ? t('healthPendingScanning') : tf('healthPendingCount', { n: pending.count })}</div>`
+      : '';
+    const fixBtn = pending
+      ? `<button class="btn secondary health-open-run" type="button" data-job="${pending.job_id}" data-tool="${m.tool}">${pending.scanning ? t('healthOpenRun') : t('healthReviewRun')}</button>`
+      : value ? `<button class="btn secondary health-fix" type="button" data-metric="${m.key}">${t('healthFix')}</button>` : '';
+    return `<div class="health-tile ${value ? 'todo' : 'ok'} ${healthState.open === m.key ? 'open' : ''} ${running ? 'refreshing' : ''}">
       <div class="health-value">${value ? value.toLocaleString() : '✓'}</div>
       <div class="health-label">${t('health_' + m.key)}</div>
       ${ignoredCount ? `<div class="health-ignored-count">${tf('healthIgnoredCount', { n: ignoredCount })}</div>` : ''}
+      ${pendingHtml}
       <div class="health-tile-actions">
-        ${value ? `<button class="btn secondary health-fix" type="button" data-metric="${m.key}">${t('healthFix')}</button>` : ''}
+        ${fixBtn}
         ${value || ignoredCount ? `<button class="btn secondary health-entries" type="button" data-metric="${m.key}">${t('healthEntries')}</button>` : ''}
       </div>
     </div>`;
@@ -1257,6 +1267,9 @@ function renderHealth(data) {
   el('health-grid').querySelectorAll('.health-fix').forEach((b) => b.addEventListener('click', () => {
     const m = HEALTH_METRICS.find((x) => x.key === b.dataset.metric);
     startTool(m.endpoint, toolTitle(m.tool), m.body);
+  }));
+  el('health-grid').querySelectorAll('.health-open-run').forEach((b) => b.addEventListener('click', () => {
+    openToolJob(b.dataset.job, toolTitle(b.dataset.tool));
   }));
   el('health-grid').querySelectorAll('.health-entries').forEach((b) => b.addEventListener('click', () => {
     if (healthState.open === b.dataset.metric) closeHealthDetail();
@@ -1353,10 +1366,16 @@ async function openHealthDetail(metric, scroll = true) {
 
 async function loadHealth() {
   try {
-    const data = await (await fetch('/api/health')).json();
+    let data = await (await fetch('/api/health')).json();
+    // Refresh on its own (no AI, runs in the background) when it was never
+    // computed or something was applied since - e.g. after "Fix" + review.
+    if (currentArea === 'maintain' && !data.running && !data.error && (data.stale || !data.computed_at)) {
+      data = await (await fetch('/api/health/refresh', { method: 'POST' })).json();
+    }
     renderHealth(data);
     clearTimeout(loadHealth.timer);
-    if (data.running && currentArea === 'maintain') loadHealth.timer = setTimeout(loadHealth, 3000);
+    const scanning = Object.values(data.pending || {}).some((p) => p.scanning);
+    if ((data.running || scanning) && currentArea === 'maintain') loadHealth.timer = setTimeout(loadHealth, 3000);
   } catch (e) { /* optional panel */ }
 }
 
@@ -1611,6 +1630,7 @@ el('tools-back-btn').addEventListener('click', () => {
   el('tools-run-view').classList.add('hidden');
   el('tools-cards-view').classList.remove('hidden');
   loadNewRecipesStatus();
+  loadHealth();
 });
 
 document.querySelectorAll('.tool-start-btn').forEach((btn) => {
