@@ -804,3 +804,6 @@ a { color: inherit; }
   color: var(--paper); padding: 7px 8px; font-size: 0.88rem; color-scheme: dark;
 }
 .meal-plan-form .btn { justify-self: start; }
+
+.source-line { font-size: 0.82rem; color: #8f9689; margin: -8px 0 16px; overflow-wrap: anywhere; }
+.source-line a { color: var(--gold); }

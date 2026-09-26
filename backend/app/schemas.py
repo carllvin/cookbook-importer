@@ -56,6 +56,7 @@ class ExtractedRecipe(BaseModel):
     tandoor_recipe_id: Optional[int] = None
     duplicate_match: Optional[str] = None    # name of the probably-already-existing Tandoor recipe
     duplicate_exact: bool = False            # True = (near-)exact title match, False = only similar
+    source_url: Optional[str] = None         # web page the recipe was imported from (URL import) -> Tandoor's "source_url"
 
 
 class Job(BaseModel):

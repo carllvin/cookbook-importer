@@ -246,7 +246,7 @@ def _build_recipe_payload(recipe: ExtractedRecipe, client: httpx.Client) -> dict
             "show_as_header": False,
         })
 
-    return {
+    payload = {
         "name": _truncate(recipe.title, RECIPE_NAME_MAX_LENGTH),
         "description": _truncate(recipe.description or "", RECIPE_DESCRIPTION_MAX_LENGTH),
         "servings": recipe.servings or 1,
@@ -256,6 +256,10 @@ def _build_recipe_payload(recipe: ExtractedRecipe, client: httpx.Client) -> dict
         "steps": steps_payload,
         "internal": True,
     }
+    if recipe.source_url:
+        # Shown by Tandoor as "Imported from <link>" on the recipe.
+        payload["source_url"] = recipe.source_url[:1024]
+    return payload
 
 
 def create_recipe(client: httpx.Client, recipe: ExtractedRecipe) -> int:
