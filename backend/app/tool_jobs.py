@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 
+from . import usage_log
 from .config import settings
 from .schemas import ToolJob
 
@@ -76,7 +77,20 @@ def get_tool_job(job_id: str) -> ToolJob | None:
         return _tool_jobs.get(job_id)
 
 
+def _log_usage(job: ToolJob) -> None:
+    """Records tokens used since the last record (a finished run can still
+    use more, e.g. re-rolling a day of a meal plan)."""
+    logged_in, logged_out = job.meta.get("usage_logged", [0, 0])
+    new_in = job.token_usage.input_tokens - logged_in
+    new_out = job.token_usage.output_tokens - logged_out
+    if new_in > 0 or new_out > 0:
+        usage_log.record(job.tool, new_in, new_out)
+        job.meta["usage_logged"] = [job.token_usage.input_tokens, job.token_usage.output_tokens]
+
+
 def save_tool_job(job: ToolJob) -> None:
+    if job.status != "scanning":
+        _log_usage(job)
     with _lock:
         _tool_jobs[job.id] = job
     # While scanning, progress is saved every few items - only write to

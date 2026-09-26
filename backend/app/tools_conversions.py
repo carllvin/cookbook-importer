@@ -88,9 +88,9 @@ def recipe_pairs(recipes) -> dict[tuple[int, int], int]:
     return pairs
 
 
-def conversion_suggestions(job, client, pairs, pending_nutrition=None, food_names=None) -> list[ToolSuggestion]:
-    """Conversion suggestions for the given (food, unit) pairs - see the
-    module docstring. Shared by this tool and the new-recipes workflow.
+def find_missing(client, pairs, pending_nutrition=None, food_names=None) -> tuple[list[ToolSuggestion], list[dict]]:
+    """The no-AI part: (ready general metric conversions, pairs that need an
+    AI estimate). Also used by the health overview to count what's missing.
 
     pending_nutrition: food id -> "g"/"ml" for foods that don't have
     nutrition values yet but will once a pending suggestion is applied (they
@@ -149,7 +149,13 @@ def conversion_suggestions(job, client, pairs, pending_nutrition=None, food_name
             continue
         name = food_names.get(food_id, food["name"])
         to_estimate.append({"food": {"id": food["id"], "name": name}, "unit": unit, "target": target, "count": count})
+    return suggestions, to_estimate
 
+
+def conversion_suggestions(job, client, pairs, pending_nutrition=None, food_names=None) -> list[ToolSuggestion]:
+    """Conversion suggestions for the given (food, unit) pairs - see the
+    module docstring. Shared by this tool and the new-recipes workflow."""
+    suggestions, to_estimate = find_missing(client, pairs, pending_nutrition, food_names)
     job.progress_total = len(to_estimate)
     job.cost_estimate = job.cost_estimate or (
         f"{len(to_estimate)} ingredient/unit pair(s) to estimate -> "

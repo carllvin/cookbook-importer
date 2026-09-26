@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import image_gen, import_matching, jobs, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
+from . import health, image_gen, import_matching, jobs, usage_log, recipe_restructure, tandoor_client, tool_jobs, tools_conversions, tools_meal_plan, tools_ingredients, tools_new_recipes, tools_recipes, tools_tags, tools_units
 from .ai_extractor import extract_recipes_from_pages, guess_cookbook_title
 from .config import settings, get_ui_language_code
 from .epub_processor import SUPPORTED_EPUB_EXTENSIONS, process_epub
@@ -195,6 +195,7 @@ def _run_extraction(job_id: str, source_paths: list[str], doc_type: str, force_o
         job.status = "error"
         job.error = str(exc)
     finally:
+        usage_log.record("import", job.token_usage.input_tokens, job.token_usage.output_tokens)
         jobs.save_job(job)
 
 
@@ -267,6 +268,68 @@ async def import_url(body: dict = Body(...)):
     jobs.save_job(job)
     threading.Thread(target=_run_extraction, args=(job.id, [url], "url"), daemon=True).start()
     return {"job_id": job.id}
+
+
+@app.get("/api/jobs")
+async def list_import_jobs():
+    """Recent imports (newest first) for the import page. Import jobs live in
+    memory, so this covers the time since the last restart."""
+    items = []
+    for job in sorted(jobs.list_jobs(), key=lambda j: -j.created_at)[:15]:
+        items.append({
+            "id": job.id, "filename": job.filename, "status": job.status, "created_at": job.created_at,
+            "recipes": len(job.recipes),
+            "imported": sum(1 for r in job.recipes if r.import_status == "imported"),
+        })
+    return items
+
+
+@app.get("/api/usage")
+async def token_usage(days: int = 30):
+    return usage_log.summary(max(1, min(days, 365)))
+
+
+@app.get("/api/inbox")
+async def inbox():
+    """Every pending suggestion of every run, for the review inbox - plus the
+    runs that are still scanning."""
+    items, running = [], []
+    for job in sorted(tool_jobs.list_all_tool_jobs(), key=lambda j: j.created_at):
+        if job.status == "scanning":
+            running.append({"id": job.id, "tool": job.tool, "created_at": job.created_at,
+                            "label": job.progress_label, "trigger": job.meta.get("trigger")})
+            continue
+        for s in job.suggestions:
+            if s.status != "pending":
+                continue
+            items.append({
+                "job_id": job.id, "tool": job.tool, "job_created_at": job.created_at,
+                "trigger": job.meta.get("trigger"), "auto": bool(job.meta.get("auto")),
+                "id": s.id, "kind": s.kind, "entity": s.detail.get("entity"),
+                "summary": s.summary, "preview": s.preview,
+            })
+    return {"items": items, "running": running, "count": len(items)}
+
+
+@app.get("/api/health")
+async def health_overview():
+    return health.cached()
+
+
+@app.post("/api/health/refresh")
+async def health_refresh():
+    health.start_refresh()
+    return health.cached()
+
+
+@app.get("/api/inbox/count")
+async def inbox_count():
+    count = sum(
+        1 for job in tool_jobs.list_all_tool_jobs() if job.status != "scanning"
+        for s in job.suggestions if s.status == "pending"
+    )
+    running = sum(1 for job in tool_jobs.list_all_tool_jobs() if job.status == "scanning")
+    return {"count": count, "running": running}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -625,13 +688,21 @@ async def start_meal_plan(body: dict = Body(...)):
         "start_date": body.get("start_date"),
         "days": body.get("days") or 7,
         "meal_type": {"id": meal_type["id"], "name": meal_type.get("name", "")},
-        "servings": body.get("servings") or 2,
         "wishes": (body.get("wishes") or "")[:500],
         "add_to_shopping": bool(body.get("add_to_shopping")),
     }
     tool_jobs.save_tool_job(job)
     threading.Thread(target=tools_meal_plan.run_scan, args=(job.id,), daemon=True).start()
     return {"job_id": job.id}
+
+
+@app.post("/api/tools/meal-plan/{job_id}/reroll")
+async def meal_plan_reroll(job_id: str, body: dict = Body(...)):
+    try:
+        job = await asyncio.to_thread(tools_meal_plan.reroll_day, job_id, body.get("date", ""))
+    except tandoor_client.TandoorError as exc:
+        raise HTTPException(400, str(exc))
+    return job.model_dump()
 
 
 @app.post("/api/tools/recipes/restructure")

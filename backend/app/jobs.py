@@ -27,6 +27,11 @@ def get_job(job_id: str) -> Job | None:
         return _jobs.get(job_id)
 
 
+def list_jobs() -> list[Job]:
+    with _lock:
+        return list(_jobs.values())
+
+
 def save_job(job: Job) -> None:
     with _lock:
         _jobs[job.id] = job

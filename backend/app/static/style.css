@@ -660,13 +660,17 @@ a { color: inherit; }
 
 /* ---------- Tools screen ---------- */
 
-.tools-screen {
+.tools-screen, .area-screen {
+  flex: 1;
+  min-height: 0;
   padding: 40px 32px;
-  max-width: 900px;
+  max-width: 980px;
   margin: 0 auto;
   width: 100%;
   overflow-y: auto;
 }
+.area-screen h1 { margin: 0 0 10px; }
+.area-screen .lede { color: #b9c0b5; margin: 0 0 28px; }
 .tools-screen h1 { margin: 0 0 10px; }
 .tools-screen .lede { color: #b9c0b5; margin: 0 0 32px; }
 
@@ -807,3 +811,107 @@ a { color: inherit; }
 
 .source-line { font-size: 0.82rem; color: #8f9689; margin: -8px 0 16px; overflow-wrap: anywhere; }
 .source-line a { color: var(--gold); }
+
+/* ---------- Areas & navigation ---------- */
+
+#area-import { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.topbar { align-items: center; gap: 16px; }
+.main-nav { display: flex; gap: 4px; margin: 0 auto 0 32px; }
+.nav-btn {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  background: none; border: 1px solid transparent; border-radius: 999px;
+  color: #b9c0b5; padding: 6px 14px; font-size: 0.9rem;
+}
+.nav-btn:hover { color: var(--paper); border-color: #3a3f3a; }
+.nav-btn.active { color: var(--ink); background: var(--paper); }
+.nav-icon { font-size: 1rem; line-height: 1; }
+.nav-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--gold); color: var(--ink); font-size: 0.7rem; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.spinner.small { width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; }
+
+@media (max-width: 800px) {
+  .topbar { padding: 14px 16px; }
+  .main-nav {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; margin: 0;
+    justify-content: space-around; padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+    background: var(--ink); border-top: 1px solid #3a3f3a;
+  }
+  .nav-btn { flex-direction: column; gap: 2px; font-size: 0.72rem; padding: 4px 10px; border-radius: var(--radius); }
+  .nav-btn.active { background: rgba(239,233,218,0.1); color: var(--paper); }
+  .nav-icon { font-size: 1.2rem; }
+  .nav-badge { position: absolute; top: 0; right: 4px; }
+  .app { padding-bottom: 64px; }
+  .area-screen, .tools-screen { padding: 24px 16px; }
+}
+
+/* ---------- Import: recent imports ---------- */
+
+.recent-imports { width: min(560px, 90vw); margin-top: 32px; }
+.recent-imports h3 { margin: 0 0 8px; font-size: 0.95rem; }
+
+/* ---------- Review inbox ---------- */
+
+.inbox-running-row { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: #b9c0b5; margin-bottom: 8px; }
+.inbox-group { margin-bottom: 26px; }
+.inbox-group-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  position: sticky; top: -40px; z-index: 4; background: var(--ink); padding: 8px 0;
+  border-bottom: 1px solid #2a2f2a; margin-bottom: 10px;
+}
+.inbox-group-head h2 { margin: 0; font-size: 1.05rem; }
+.inbox-count { font-family: 'Work Sans', sans-serif; font-size: 0.75rem; color: var(--ink); background: #b9c0b5; border-radius: 999px; padding: 1px 7px; vertical-align: middle; }
+.inbox-collapse { background: none; border: none; color: #b9c0b5; font-size: 0.9rem; padding: 0 2px; }
+.inbox-hint { font-size: 0.8rem; color: #8f9689; margin: -4px 0 10px; }
+.inbox-source { font-size: 0.75rem; color: #8f9689; margin-top: 3px; }
+.inbox-error { font-size: 0.78rem; color: #e08a7e; margin-top: 4px; }
+.inbox-empty { color: #8f9689; padding: 40px 0; text-align: center; }
+
+/* ---------- Plan: week view ---------- */
+
+.plan-form-card { margin-bottom: 20px; }
+.plan-week { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.plan-day {
+  position: relative; display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid #2a2f2a; border-radius: var(--radius); padding: 12px; min-height: 130px;
+  background: rgba(239,233,218,0.02);
+}
+.plan-day.selected { border-color: var(--gold-dim); }
+.plan-day.applied { border-color: var(--green); opacity: 0.75; }
+.plan-day.taken, .plan-day.empty { opacity: 0.6; }
+.plan-day-head { font-size: 0.82rem; color: #b9c0b5; }
+.plan-check { position: absolute; top: 10px; right: 10px; }
+.plan-recipe { font-family: 'Fraunces', serif; font-weight: 600; font-size: 1rem; }
+.plan-meta { font-size: 0.78rem; color: #8f9689; flex: 1; }
+.plan-empty { font-size: 0.82rem; color: #8f9689; flex: 1; }
+.plan-done { font-size: 0.8rem; color: #8fb996; }
+.plan-reroll { padding: 4px 8px; font-size: 0.75rem; align-self: flex-start; }
+.plan-actions {
+  display: flex; align-items: center; gap: 12px; margin-top: 16px; padding: 12px 0;
+  position: sticky; bottom: 0; background: var(--ink);
+}
+
+/* ---------- Maintain ---------- */
+
+.maintain-top { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+.maintain-top .tool-card-featured { margin-bottom: 0; }
+.usage-by-source { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: #b9c0b5; }
+.usage-row { display: flex; justify-content: space-between; gap: 8px; }
+.health-card { margin-bottom: 28px; }
+.health-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.health-head h3 { margin: 0; }
+.health-head .btn { margin-left: auto; padding: 5px 12px; font-size: 0.8rem; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
+.health-tile { border: 1px solid #2a2f2a; border-radius: var(--radius); padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.health-tile.todo { border-color: var(--gold-dim); }
+.health-value { font-family: 'Fraunces', serif; font-size: 1.5rem; font-weight: 600; }
+.health-tile.ok .health-value { color: #8fb996; }
+.health-label { font-size: 0.78rem; color: #b9c0b5; flex: 1; }
+.health-fix { padding: 4px 10px; font-size: 0.75rem; align-self: flex-start; }
+.tool-group { margin-bottom: 28px; }
+.tool-group-title { font-size: 1.1rem; margin: 0 0 10px; }
+@media (max-width: 800px) {
+  .maintain-top { grid-template-columns: 1fr; }
+}

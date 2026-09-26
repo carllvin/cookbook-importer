@@ -10,107 +10,158 @@
   <div class="app">
     <div class="topbar">
       <div class="brand" id="brand-link" role="button" tabindex="0"><em>Tandoor</em> Helper</div>
+      <nav class="main-nav" id="main-nav">
+        <button type="button" class="nav-btn active" data-area="import"><span class="nav-icon">📥</span><span data-i18n="navImport">Import</span></button>
+        <button type="button" class="nav-btn" data-area="inbox"><span class="nav-icon">✅</span><span data-i18n="navInbox">Review</span><span id="inbox-badge" class="nav-badge hidden">0</span></button>
+        <button type="button" class="nav-btn" data-area="plan"><span class="nav-icon">📅</span><span data-i18n="navPlan">Plan</span></button>
+        <button type="button" class="nav-btn" data-area="maintain"><span class="nav-icon">🔧</span><span data-i18n="navMaintain">Maintain</span></button>
+      </nav>
       <div id="topbar-badges">
         <div id="usage-badge" class="usage-badge hidden"></div>
-        <button id="tools-nav-btn" class="tandoor-badge tools-nav-btn" type="button" data-i18n="toolsNavBtn">🔧 Tools</button>
         <div id="tandoor-badge" class="tandoor-badge" data-i18n="tandoorChecking">Checking Tandoor …</div>
       </div>
     </div>
     <div id="tandoor-error-banner" class="tandoor-error-banner hidden"></div>
 
-    <!-- Tools -->
-    <div id="tools-screen" class="tools-screen hidden">
+    <!-- Review inbox -->
+    <div id="area-inbox" class="area-screen hidden">
+      <h1 data-i18n="inboxHeadline">Review</h1>
+      <p class="lede" data-i18n="inboxLede">All suggestions waiting for your approval - from automatic runs, post-processing after imports and tools you started.</p>
+      <div id="inbox-running" class="inbox-running"></div>
+      <div id="inbox-groups"></div>
+    </div>
+
+    <!-- Meal plan -->
+    <div id="area-plan" class="area-screen hidden">
+      <h1 data-i18n="toolMealPlanTitle">Meal plan &amp; shopping list</h1>
+      <p class="lede" data-i18n="toolMealPlanDesc">Picks one of your recipes per day.</p>
+      <div class="tool-card plan-form-card">
+        <form id="meal-plan-form" class="meal-plan-form">
+          <label><span data-i18n="mealPlanStart">Start</span><input id="mp-start" type="date" required /></label>
+          <label><span data-i18n="mealPlanDays">Days</span><input id="mp-days" type="number" min="1" max="14" value="7" required /></label>
+          <label><span data-i18n="mealPlanMeal">Meal</span><select id="mp-meal" required></select></label>
+          <label class="mp-wide"><span data-i18n="mealPlanWishes">Wishes</span><input id="mp-wishes" type="text" data-i18n-placeholder="mealPlanWishesPlaceholder" placeholder="e.g. 2x vegetarian, quick on weekdays" /></label>
+          <label class="mp-wide mp-check"><input id="mp-shopping" type="checkbox" checked /> <span data-i18n="mealPlanShopping">Add ingredients to the shopping list</span></label>
+          <p id="mp-hint" class="new-recipes-auto hidden mp-wide"></p>
+          <button id="mp-start-btn" class="btn" type="submit" data-i18n="mealPlanStartBtn">Plan</button>
+        </form>
+      </div>
+      <div id="plan-progress" class="tools-run-progress hidden">
+        <div class="spinner"></div>
+        <div class="status-text" data-i18n="planRunning">Planning …</div>
+      </div>
+      <div id="plan-error" class="error-banner hidden"></div>
+      <div id="plan-week" class="plan-week"></div>
+      <div id="plan-actions" class="plan-actions hidden">
+        <span id="plan-status" class="tools-bulk-status"></span>
+        <button id="plan-apply-btn" class="btn" type="button"></button>
+      </div>
+    </div>
+
+    <!-- Maintain (tools) -->
+    <div id="tools-screen" class="tools-screen area-screen hidden">
       <div id="tools-cards-view">
-        <h1 data-i18n="toolsHeadline">Maintenance tools</h1>
-        <p class="lede" data-i18n="toolsLede">
-          These work directly on your existing Tandoor data, independent of
-          importing a new cookbook. Every tool shows its suggestions first -
-          nothing is changed until you approve it.
-        </p>
-        <div id="tools-open-runs" class="tools-open-runs hidden">
-          <h3 data-i18n="toolOpenRunsTitle">Open suggestions</h3>
-          <div id="tools-open-runs-list" class="new-recipes-open-jobs"></div>
-        </div>
-        <div class="tool-card tool-card-featured">
-          <div class="tool-card-icon">🆕</div>
-          <h3 data-i18n="toolNewRecipesTitle">Process new recipes</h3>
-          <p data-i18n="toolNewRecipesDesc">For recipes added since the last run (via Tandoor or this app): translates them automatically, then suggests revising their structure (steps, ingredients per step, servings, times), matching their ingredients, units and tags to existing ones, filling in ingredient details, and adding tags.</p>
-          <p id="new-recipes-status" class="new-recipes-status"></p>
-          <p id="new-recipes-auto" class="new-recipes-auto hidden"></p>
-          <div id="new-recipes-open-jobs" class="new-recipes-open-jobs"></div>
-          <button id="new-recipes-start-btn" class="btn tool-start-btn" data-tool="new_recipes" data-endpoint="/api/tools/new-recipes/process" data-i18n="toolStartBtn" disabled>Start</button>
-        </div>
-        <div class="tool-card tool-card-featured">
-          <div class="tool-card-icon">📅</div>
-          <h3 data-i18n="toolMealPlanTitle">Meal plan &amp; shopping list</h3>
-          <p data-i18n="toolMealPlanDesc">Picks one of your recipes per day - by season, variety and your wishes - and adds them to Tandoor's meal plan, optionally with the ingredients on the shopping list.</p>
-          <form id="meal-plan-form" class="meal-plan-form">
-            <label><span data-i18n="mealPlanStart">Start</span><input id="mp-start" type="date" required /></label>
-            <label><span data-i18n="mealPlanDays">Days</span><input id="mp-days" type="number" min="1" max="14" value="7" required /></label>
-            <label><span data-i18n="mealPlanMeal">Meal</span><select id="mp-meal" required></select></label>
-            <label><span data-i18n="mealPlanServings">Servings</span><input id="mp-servings" type="number" min="1" max="20" value="2" required /></label>
-            <label class="mp-wide"><span data-i18n="mealPlanWishes">Wishes</span><input id="mp-wishes" type="text" data-i18n-placeholder="mealPlanWishesPlaceholder" placeholder="e.g. 2x vegetarian, quick on weekdays" /></label>
-            <label class="mp-wide mp-check"><input id="mp-shopping" type="checkbox" checked /> <span data-i18n="mealPlanShopping">Add ingredients to the shopping list</span></label>
-            <p id="mp-hint" class="new-recipes-auto hidden mp-wide"></p>
-            <button id="mp-start-btn" class="btn" type="submit" data-i18n="mealPlanStartBtn">Plan</button>
-          </form>
-        </div>
-        <div class="tools-grid">
-          <div class="tool-card">
-            <div class="tool-card-icon">🥕</div>
-            <h3 data-i18n="toolIngredientsReviewTitle">Ingredients: review &amp; clean up</h3>
-            <p data-i18n="toolIngredientsReviewDesc">Fixes prepared-form names, translates, and merges duplicates.</p>
-            <button class="btn tool-start-btn" data-tool="ingredients_review" data-endpoint="/api/tools/ingredients/review" data-i18n="toolStartBtn">Start</button>
+        <h1 data-i18n="maintainHeadline">Maintain</h1>
+        <p class="lede" data-i18n="maintainLede">Keep your Tandoor collection tidy. Every tool shows suggestions first - you review them under "Review".</p>
+        <div class="maintain-top">
+          <div class="tool-card tool-card-featured">
+            <div class="tool-card-icon">🆕</div>
+            <h3 data-i18n="toolNewRecipesTitle">Process new recipes</h3>
+            <p data-i18n="toolNewRecipesDesc">For recipes added since the last run (via Tandoor or this app): translates them automatically, then suggests revising their structure (steps, ingredients per step, servings, times), matching their ingredients, units and tags to existing ones, filling in ingredient details, and adding tags.</p>
+            <p id="new-recipes-status" class="new-recipes-status"></p>
+            <p id="new-recipes-auto" class="new-recipes-auto hidden"></p>
+            <div id="new-recipes-open-jobs" class="new-recipes-open-jobs"></div>
+            <button id="new-recipes-start-btn" class="btn tool-start-btn" data-tool="new_recipes" data-endpoint="/api/tools/new-recipes/process" data-i18n="toolStartBtn" disabled>Start</button>
           </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🥗</div>
-            <h3 data-i18n="toolIngredientsEnrichTitle">Ingredients: plural, nutrition &amp; category</h3>
-            <p data-i18n="toolIngredientsEnrichDesc">Adds a missing plural, rough nutritional values (per 100 g) and supermarket category (existing ones only) to ingredients that lack them.</p>
-            <button class="btn tool-start-btn" data-tool="ingredients_enrich" data-endpoint="/api/tools/ingredients/enrich" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">⚖️</div>
-            <h3 data-i18n="toolConversionsTitle">Ingredients: gram conversions</h3>
-            <p data-i18n="toolConversionsDesc">Adds the unit conversions (e.g. 1 EL olive oil = 13 g) Tandoor needs to calculate recipe nutrition - for ingredients with nutrition values.</p>
-            <button class="btn tool-start-btn" data-tool="conversions" data-endpoint="/api/tools/conversions" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🏷️</div>
-            <h3 data-i18n="toolTagsCleanupTitle">Tags: translate &amp; simplify</h3>
-            <p data-i18n="toolTagsCleanupDesc">Translates tags and merges ones that mean the same thing - in one pass.</p>
-            <button class="btn tool-start-btn" data-tool="tags_cleanup" data-endpoint="/api/tools/tags/cleanup" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🍂</div>
-            <h3 data-i18n="toolTagsSeasonTitle">Tags: add season</h3>
-            <p data-i18n="toolTagsSeasonDesc">Backfills a season tag on recipes missing one.</p>
-            <button class="btn tool-start-btn" data-tool="tags_season" data-endpoint="/api/tools/tags/season" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">➕</div>
-            <h3 data-i18n="toolTagsSuggestMoreTitle">Tags: suggest more</h3>
-            <p data-i18n="toolTagsSuggestMoreDesc">Suggests descriptive tags (e.g. American, sweet, baking) – no ingredients. Prefers existing tags but may add useful new ones.</p>
-            <button class="btn tool-start-btn" data-tool="tags_suggest_more" data-endpoint="/api/tools/tags/suggest-more" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">📏</div>
-            <h3 data-i18n="toolUnitsTitle">Units: review &amp; clean up</h3>
-            <p data-i18n="toolUnitsDesc">Unifies spellings, translates, and fills in missing plurals.</p>
-            <button class="btn tool-start-btn" data-tool="units_review" data-endpoint="/api/tools/units/review" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🌐</div>
-            <h3 data-i18n="toolRecipesTranslateTitle">Recipes: translate</h3>
-            <p data-i18n="toolRecipesTranslateDesc">Translates existing recipes (title, description, steps, ingredient notes) into your output language.</p>
-            <button class="btn tool-start-btn" data-tool="recipes_translate" data-endpoint="/api/tools/recipes/translate" data-i18n="toolStartBtn">Start</button>
-          </div>
-          <div class="tool-card">
-            <div class="tool-card-icon">🧩</div>
-            <h3 data-i18n="toolRecipesRestructureTitle">Recipes: revise structure</h3>
-            <p data-i18n="toolRecipesRestructureDesc">Finds recipes with all ingredients in step 1 or one long block of text, and suggests splitting them into steps, assigning ingredients to steps, and filling in servings and times.</p>
-            <button class="btn tool-start-btn" data-tool="recipes_restructure" data-endpoint="/api/tools/recipes/restructure" data-i18n="toolStartBtn">Start</button>
+          <div class="tool-card usage-card">
+            <div class="tool-card-icon">📊</div>
+            <h3 data-i18n="usageTitle">AI usage (30 days)</h3>
+            <p id="usage-total" class="new-recipes-status"></p>
+            <div id="usage-by-source" class="usage-by-source"></div>
           </div>
         </div>
+        <section class="tool-card health-card">
+          <div class="health-head">
+            <h3 data-i18n="healthTitle">State of your collection</h3>
+            <span id="health-when" class="new-recipes-auto"></span>
+            <button id="health-refresh-btn" class="btn secondary" type="button" data-i18n="healthRefresh">Refresh</button>
+          </div>
+          <div id="health-grid" class="health-grid"></div>
+        </section>
+        <section class="tool-group">
+          <h2 class="tool-group-title" data-i18n="groupToolsIngredients">Ingredients</h2>
+          <div class="tools-grid">
+            <div class="tool-card">
+              <div class="tool-card-icon">🥕</div>
+              <h3 data-i18n="toolIngredientsReviewTitle">Ingredients: review &amp; clean up</h3>
+              <p data-i18n="toolIngredientsReviewDesc">Fixes prepared-form names, translates, and merges duplicates.</p>
+              <button class="btn tool-start-btn" data-tool="ingredients_review" data-endpoint="/api/tools/ingredients/review" data-i18n="toolStartBtn">Start</button>
+            </div>
+            <div class="tool-card">
+              <div class="tool-card-icon">🥗</div>
+              <h3 data-i18n="toolIngredientsEnrichTitle">Ingredients: plural, nutrition &amp; category</h3>
+              <p data-i18n="toolIngredientsEnrichDesc">Adds a missing plural, rough nutritional values (per 100 g) and supermarket category (existing ones only) to ingredients that lack them.</p>
+              <button class="btn tool-start-btn" data-tool="ingredients_enrich" data-endpoint="/api/tools/ingredients/enrich" data-i18n="toolStartBtn">Start</button>
+            </div>
+            <div class="tool-card">
+              <div class="tool-card-icon">⚖️</div>
+              <h3 data-i18n="toolConversionsTitle">Ingredients: gram conversions</h3>
+              <p data-i18n="toolConversionsDesc">Adds the unit conversions (e.g. 1 EL olive oil = 13 g) Tandoor needs to calculate recipe nutrition - for ingredients with nutrition values.</p>
+              <button class="btn tool-start-btn" data-tool="conversions" data-endpoint="/api/tools/conversions" data-i18n="toolStartBtn">Start</button>
+            </div>
+          </div>
+        </section>
+        <section class="tool-group">
+          <h2 class="tool-group-title" data-i18n="groupToolsTags">Tags</h2>
+          <div class="tools-grid">
+            <div class="tool-card">
+              <div class="tool-card-icon">🏷️</div>
+              <h3 data-i18n="toolTagsCleanupTitle">Tags: translate &amp; simplify</h3>
+              <p data-i18n="toolTagsCleanupDesc">Translates tags and merges ones that mean the same thing - in one pass.</p>
+              <button class="btn tool-start-btn" data-tool="tags_cleanup" data-endpoint="/api/tools/tags/cleanup" data-i18n="toolStartBtn">Start</button>
+            </div>
+            <div class="tool-card">
+              <div class="tool-card-icon">🍂</div>
+              <h3 data-i18n="toolTagsSeasonTitle">Tags: add season</h3>
+              <p data-i18n="toolTagsSeasonDesc">Backfills a season tag on recipes missing one.</p>
+              <button class="btn tool-start-btn" data-tool="tags_season" data-endpoint="/api/tools/tags/season" data-i18n="toolStartBtn">Start</button>
+            </div>
+            <div class="tool-card">
+              <div class="tool-card-icon">➕</div>
+              <h3 data-i18n="toolTagsSuggestMoreTitle">Tags: suggest more</h3>
+              <p data-i18n="toolTagsSuggestMoreDesc">Suggests descriptive tags (e.g. American, sweet, baking) – no ingredients. Prefers existing tags but may add useful new ones.</p>
+              <button class="btn tool-start-btn" data-tool="tags_suggest_more" data-endpoint="/api/tools/tags/suggest-more" data-i18n="toolStartBtn">Start</button>
+            </div>
+          </div>
+        </section>
+        <section class="tool-group">
+          <h2 class="tool-group-title" data-i18n="groupToolsUnits">Units</h2>
+          <div class="tools-grid">
+            <div class="tool-card">
+              <div class="tool-card-icon">📏</div>
+              <h3 data-i18n="toolUnitsTitle">Units: review &amp; clean up</h3>
+              <p data-i18n="toolUnitsDesc">Unifies spellings, translates, and fills in missing plurals.</p>
+              <button class="btn tool-start-btn" data-tool="units_review" data-endpoint="/api/tools/units/review" data-i18n="toolStartBtn">Start</button>
+            </div>
+          </div>
+        </section>
+        <section class="tool-group">
+          <h2 class="tool-group-title" data-i18n="groupToolsRecipes">Recipes</h2>
+          <div class="tools-grid">
+            <div class="tool-card">
+              <div class="tool-card-icon">🌐</div>
+              <h3 data-i18n="toolRecipesTranslateTitle">Recipes: translate</h3>
+              <p data-i18n="toolRecipesTranslateDesc">Translates existing recipes (title, description, steps, ingredient notes) into your output language.</p>
+              <button class="btn tool-start-btn" data-tool="recipes_translate" data-endpoint="/api/tools/recipes/translate" data-i18n="toolStartBtn">Start</button>
+            </div>
+            <div class="tool-card">
+              <div class="tool-card-icon">🧩</div>
+              <h3 data-i18n="toolRecipesRestructureTitle">Recipes: revise structure</h3>
+              <p data-i18n="toolRecipesRestructureDesc">Finds recipes with all ingredients in step 1 or one long block of text, and suggests splitting them into steps, assigning ingredients to steps, and filling in servings and times.</p>
+              <button class="btn tool-start-btn" data-tool="recipes_restructure" data-endpoint="/api/tools/recipes/restructure" data-i18n="toolStartBtn">Start</button>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div id="tools-run-view" class="tools-run-view hidden">
@@ -136,6 +187,7 @@
       </div>
     </div>
 
+    <div id="area-import">
     <!-- Upload -->
     <div id="upload-screen" class="upload-screen">
       <h1 data-i18n="uploadHeadline">Turn your cookbook into a recipe database</h1>
@@ -158,6 +210,10 @@
         </div>
       </form>
       <div id="upload-error" class="error-banner hidden" style="margin-top:18px;"></div>
+      <div id="recent-imports" class="recent-imports hidden">
+        <h3 data-i18n="recentImportsTitle">Recent imports</h3>
+        <div id="recent-imports-list" class="new-recipes-open-jobs"></div>
+      </div>
     </div>
 
     <!-- Processing -->
@@ -196,6 +252,7 @@
         </div>
       </div>
     </div>
+    </div><!-- /area-import -->
   </div>
 
   <!-- Import result popup -->
